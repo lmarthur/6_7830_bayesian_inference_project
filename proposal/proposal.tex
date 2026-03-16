@@ -1,0 +1,23 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+
+\title{Beyond the Shadow of a Doubt: Benchmarking Parallelizable MCMC Sampling Algorithms for Multimodal Astrophysical Data}
+\author{Lucas Arthur \and Samson Mercier}
+\date{March 10, 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+As astrophysics enters the era of petabyte-scale datasets, the implementation of efficient, scalable inference algorithms is crucial. The choice of inference algorithm and implementation for a research problem could
+make the difference between an intractable or incorrect analysis and a major scientific discovery. The high dimensionality and multi-modality of posterior distributions can pose problems for popular inference tools. 
+To ensure that the astrophysics community is fully leveraging available inference algorithms, we will benchmark a set of widespread tools from across the astrophysical literature. We will consider affine-invariant Markov 
+chain Monte Carlo (MCMC), parallel tempering MCMC, sequential Monte Carlo with tempering, and NUTS. To ensure comparability we will either use existing JAX-based implementations of these tools, or re-implement the inference 
+algorithms to leverage JAX. We will then apply this set of tools to a highly-multimodal inference problem common in exoplanet science, producing a set of exoplanet-specific benchmarks, as well as to a simple toy model to 
+demonstrate the relative efficiencies of the set of sampling techniques. By measuring a range of performance metrics including speed and computational efficiency, as well as ability to identify the complete character of the 
+target posterior, we will provide a set of recommendations for which tools to adopt, and which to avoid, for a given astrophysical problem.
+
+\end{abstract}
+
+\end{document}
