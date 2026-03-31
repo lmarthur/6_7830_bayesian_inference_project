@@ -1,23 +1,80 @@
 \documentclass{article}
-\usepackage{graphicx} % Required for inserting images
+\usepackage{graphicx}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{parskip}
+\setlist{noitemsep, topsep=3pt, leftmargin=*}
 
-\title{Beyond the Shadow of a Doubt: Benchmarking Parallelizable MCMC Sampling Algorithms for Multimodal Astrophysical Data}
+\title{Beyond the Shadow of a Doubt: Benchmarking MCMC Sampling Algorithms for Multimodal Astrophysical Inference}
 \author{Lucas Arthur \and Samson Mercier}
-\date{March 10, 2026}
+\date{\today}
+
+% TODO: Add "stretch goals"
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-As astrophysics enters the era of petabyte-scale datasets, the implementation of efficient, scalable inference algorithms is crucial. The choice of inference algorithm and implementation for a research problem could
-make the difference between an intractable or incorrect analysis and a major scientific discovery. The high dimensionality and multi-modality of posterior distributions can pose problems for popular inference tools. 
-To ensure that the astrophysics community is fully leveraging available inference algorithms, we will benchmark a set of widespread tools from across the astrophysical literature. We will consider affine-invariant Markov 
-chain Monte Carlo (MCMC), parallel tempering MCMC, sequential Monte Carlo with tempering, and NUTS. To ensure comparability we will either use existing JAX-based implementations of these tools, or re-implement the inference 
-algorithms to leverage JAX. We will then apply this set of tools to a highly-multimodal inference problem common in exoplanet science, producing a set of exoplanet-specific benchmarks, as well as to a simple toy model to 
-demonstrate the relative efficiencies of the set of sampling techniques. By measuring a range of performance metrics including speed and computational efficiency, as well as ability to identify the complete character of the 
-target posterior, we will provide a set of recommendations for which tools to adopt, and which to avoid, for a given astrophysical problem.
-
+As astrophysics enters the era of petabyte-scale datasets, the choice of inference algorithm and implementation for a research problem could make the difference between an intractable or incorrect analysis and a major scientific discovery. The high dimensionality and multi-modality of posterior distributions can pose problems for popular inference tools. To ensure that the astrophysics community is fully leveraging available inference algorithms, we will benchmark a set of widespread tools from across the astrophysical literature. We will benchmark eight inference algorithms---random walk Metropolis-Hastings (RWMH), affine-invariant ensemble sampling, parallel tempering, NUTS, SMC with tempering, non-reversible parallel tempering, ensemble Kalman sampling, and nested sampling (as a non-MCMC comparator)---on two test problems: a synthetic 8-component 2D Gaussian mixture with known ground truth, and a simulated exoplanet transit with stellar spots. All experiments will run on AMD EPYC 9474F 48-core CPUs and Nvidia L40S GPUs using JAX to ensure implementation-agnostic comparison. We will evaluate each sampler on mode recovery, posterior accuracy, and computational efficiency (ESS per unit compute time), and produce a concrete set of recommendations for practitioners.
 \end{abstract}
+
+\section*{Research Goals}
+
+The central question of this project is: \textit{Which parallelizable MCMC-family samplers most reliably recover multimodal posteriors in astrophysical settings, and at what computational cost?} Methods from the broader statistics literature---HMC, NUTS, SMC---are rarely adopted in astrophysics, where affine-invariant MCMC \cite{goodman2010} (emcee~\cite{emcee}) and parallel-tempering MCMC dominate. We aim to provide a reproducible, JAX-based benchmark suite that places these methods on equal footing and yields actionable guidance for the community.
+
+\section*{Data}
+
+We will use two synthetic problems, both of which are fully implemented and tested.
+
+\textbf{Gaussian mixture (toy model).} We use an 8-component 2D Gaussian mixture with fixed modes and weights. Because the ground-truth posterior is fully known, this problem enables precise evaluation of mode recovery and provides a controlled environment for comparing sampler performance.
+
+\textbf{Exoplanet transit with stellar spots.} We use a simulated photometric light curve generated from a single-transit forward model that includes star-spot occlusion. The inference task is to recover transit and spot parameters (12 parameters total for a single-spot model) from noisy photometry, a problem known to produce multimodal posteriors. All data is synthetic and reproducible on demand.
+
+\section*{Related Work}
+
+Parallel tempering is widely used in astrophysics \cite{vousden2016} but standard reversible schemes can be inefficient. Non-reversible parallel tempering \cite{syed2019} reformulates the temperature-swap process as a non-reversible Markov chain, dramatically improving mixing and serving as one of our primary algorithms of interest. Recent surveys \cite{staicova2025} benchmark modern sampling methods in cosmological contexts, providing baselines against which our results can be compared. SMC with tempering \cite{delmoral2006} and ensemble Kalman sampling \cite{garbuno2020} are other potential leading candidates for multimodal inference, neither of which have been adopted by the astrophysics community. Nested sampling is included as a non-MCMC reference point as mature implementations such as dynesty \cite{speagle2020} are common in the literature. We use the JAXNS implementation \cite{jaxns} for our comparison. We specify our models with the NumPyro \cite{numpyro} framework and use BlackJAX \cite{blackjax} sampler implementations when available. 
+
+\section*{Project Plan}
+
+Tasks are divided so that each team member implements four algorithms and applies them to the Gaussian mixture model, and applies the other four algorithms to the transit model (Table~\ref{tab:plan}).
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}p{0.46\textwidth}p{0.46\textwidth}@{}}
+\toprule
+\textbf{Lucas Arthur} & \textbf{Samson Mercier} \\
+\midrule
+\textit{Runs on Gaussian mixture:} NUTS, SMC+tempering, non-reversible PT, EKS &
+\textit{Runs on Gaussian mixture:} RWMH, affine-invariant MCMC, parallel tempering, nested sampling \\[2pt]
+\textit{Runs on transit:} RWMH, affine-invariant MCMC, parallel tempering, nested sampling &
+\textit{Runs on transit:} NUTS, SMC+tempering, non-reversible PT, EKS \\
+\midrule
+\textbf{Apr 4:} Implement and validate NUTS, SMC+tempering, non-reversible PT, and ensemble Kalman sampling in JAX/BlackJAX &
+\textbf{Apr 4:} Implement and validate RWMH, affine-invariant MCMC, parallel tempering, and nested sampling in JAX/BlackJAX \\[4pt]
+\textbf{Apr 11:} Run NUTS, SMC+tempering, non-reversible PT, and EKS on Gaussian mixture; run RWMH, affine-invariant MCMC, parallel tempering, and nested sampling on transit &
+\textbf{Apr 11:} Run RWMH, affine-invariant MCMC, parallel tempering, and nested sampling on Gaussian mixture; run NUTS, SMC+tempering, non-reversible PT, and EKS on transit \\[4pt]
+\textbf{Apr 18:} Collate all Gaussian mixture results; produce figures and tables; co-write methods and results sections &
+\textbf{Apr 18:} Collate all transit results; produce figures and tables; co-write introduction and discussion sections \\
+\midrule
+\multicolumn{2}{c}{\textbf{May 1:} Final report submitted} \\
+\bottomrule
+\end{tabular}
+\caption{Division of labor and internal deadlines.}
+\label{tab:plan}
+\end{table}
+
+\section*{Risks}
+
+\textbf{Implementation gaps.} Several algorithms---non-reversible parallel tempering, ensemble Kalman sampling, and affine-invariant MCMC (a custom JAX reimplementation of emcee)---lack mature JAX implementations and will require custom code. We mitigate the risk of delays by beginning implementation early, following test-driven development practices, and validating each sampler on the Gaussian mixture before applying it to the transit problem. If an implementation proves intractable, we will reduce the sampler count while preserving the core comparison.
+
+\textbf{Fair comparison across heterogeneous algorithms.} Different samplers expose different tuning knobs (initialization, temperature ladders, walker counts, step sizes, warm-up budgets). Inconsistent tuning could produce misleading results. We will use each algorithm's recommended defaults, apply adaptive tuning where available (e.g., dual averaging for NUTS, adaptive temperature schedules for parallel tempering), and report sensitivity analyses in appendices where possible.
+
+\textbf{Insufficient multimodality in the transit problem.} If the transit likelihood is near-unimodal for the chosen configuration, it will not differentiate samplers meaningfully. We will verify that the synthetic dataset produces a multimodal posterior before committing to it, and will adjust the spot configuration or add flares, faculae, or other degenerate parameters if it is necessary to provide multimodality.
+
+\bibliographystyle{plain}
+\bibliography{refs}
 
 \end{document}
