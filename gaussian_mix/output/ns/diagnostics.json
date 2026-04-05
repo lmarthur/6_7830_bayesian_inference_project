@@ -1,0 +1,70 @@
+{
+  "sampler": "NestedSampling_JAXNS",
+  "num_posterior_draws": 5000,
+  "prior_scale": 10.0,
+  "log_Z_mean": -6.086273326711298,
+  "log_Z_uncert": 0.061218919444665135,
+  "total_likelihood_evals": 276110,
+  "total_ns_samples": 5000,
+  "likelihood_evals_per_ns_sample": 55.222,
+  "jaxns_ess_kish": 762.4952926948924,
+  "ess_per_likelihood_eval": 0.0027615634808405795,
+  "mode_weights": [
+    0.1572,
+    0.0848,
+    0.1938,
+    0.0772,
+    0.1924,
+    0.076,
+    0.1536,
+    0.065
+  ],
+  "true_mode_weights": [
+    0.175,
+    0.075,
+    0.175,
+    0.075,
+    0.175,
+    0.075,
+    0.175,
+    0.075
+  ],
+  "arviz_summary": {
+    "mean": {
+      "x1": -0.225,
+      "x2": 0.368
+    },
+    "sd": {
+      "x1": 5.046,
+      "x2": 4.986
+    },
+    "hdi_3%": {
+      "x1": -8.38,
+      "x2": -7.937
+    },
+    "hdi_97%": {
+      "x1": 7.556,
+      "x2": 7.762
+    },
+    "mcse_mean": {
+      "x1": 0.073,
+      "x2": 0.071
+    },
+    "mcse_sd": {
+      "x1": 0.031,
+      "x2": 0.032
+    },
+    "ess_bulk": {
+      "x1": 4825.0,
+      "x2": 5010.0
+    },
+    "ess_tail": {
+      "x1": 4700.0,
+      "x2": 5042.0
+    },
+    "r_hat": {
+      "x1": null,
+      "x2": null
+    }
+  }
+}
