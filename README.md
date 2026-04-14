@@ -7,14 +7,12 @@ Project Pre-proposal Google Docs [link](https://docs.google.com/document/d/10dxl
 
 ## Prerequisites
 - [conda](https://docs.conda.io/en/latest/) (or miniconda)
-- [uv](https://github.com/astral-sh/uv) — installed automatically in step 2
 
 ## Installation
 
 ```bash
 conda create -n mcmc_bench python=3.11 -y
 conda activate mcmc_bench
-pip install uv
 bash setup_env.sh
 ```
 

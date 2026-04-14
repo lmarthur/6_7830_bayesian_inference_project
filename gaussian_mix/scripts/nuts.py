@@ -4,6 +4,7 @@ Run NUTS on the 2D Gaussian mixture model and save trace plots.
 
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -22,9 +23,10 @@ from model import make_log_density, plot_model, OUTPUT_DIR, DEFAULT_MEANS, DEFAU
 
 NUTS_OUTPUT_DIR = OUTPUT_DIR / "nuts"
 
-NUM_WARMUP = 1000
+NUM_WARMUP = 0
 NUM_SAMPLES = 5000
 NUM_CHAINS = 5
+NUTS_DEFAULT_STEP_SIZE = 0.5  # used when NUM_WARMUP == 0
 
 
 def inference_loop(rng_key, kernel, initial_state, num_samples):
@@ -46,17 +48,26 @@ def main():
     print("Plotting model...")
     plot_model()
 
+    t0 = time.perf_counter()
+
     # --- Warmup: adapt one chain, share parameters across all chains ---
     print(f"Running warmup ({NUM_WARMUP} steps)...")
-    warmup_key, sample_key = jax.random.split(rng_key)
-    warmup = blackjax.window_adaptation(blackjax.nuts, log_density_fn)
-    initial_position = jnp.array([0.0, 0.0])
-    (_, parameters), _ = warmup.run(warmup_key, initial_position, num_steps=NUM_WARMUP)
-    print(f"  Adapted step size: {parameters['step_size']:.4f}")
+    if NUM_WARMUP > 0:
+        warmup_init_key, warmup_key, run_key = jax.random.split(rng_key, 3)
+        warmup = blackjax.window_adaptation(blackjax.nuts, log_density_fn)
+        warmup_start = jax.random.uniform(warmup_init_key, shape=(2,), minval=-10.0, maxval=10.0)
+        (_, parameters), warmup_infos = warmup.run(warmup_key, warmup_start, num_steps=NUM_WARMUP)
+        warmup_grad_evals = int(warmup_infos.num_integration_steps.sum())
+        print(f"  Adapted step size: {parameters['step_size']:.4f}")
+    else:
+        run_key = rng_key
+        parameters = {"step_size": NUTS_DEFAULT_STEP_SIZE, "inverse_mass_matrix": jnp.ones(2)}
+        warmup_grad_evals = 0
+        print(f"  Warmup skipped: using default step size {NUTS_DEFAULT_STEP_SIZE}")
 
     # --- Initialize chains from random starting positions ---
-    init_key, sample_key = jax.random.split(sample_key)
-    initial_positions = jax.random.normal(init_key, shape=(NUM_CHAINS, 2)) * 3.0
+    init_key, sample_key = jax.random.split(run_key)
+    initial_positions = jax.random.uniform(init_key, shape=(NUM_CHAINS, 2), minval=-10.0, maxval=10.0)
 
     kernel = blackjax.nuts(log_density_fn, **parameters)
     init_fn = jax.vmap(kernel.init)
@@ -107,7 +118,7 @@ def main():
         },
     )
     summary = az.summary(idata, var_names=["x1", "x2"])
-    total_grad_evals = num_integration_steps.sum()
+    total_grad_evals = warmup_grad_evals + int(num_integration_steps.sum())
     total_bulk_ess = summary["ess_bulk"].sum()
     ess_per_grad = total_bulk_ess / total_grad_evals
 
@@ -140,6 +151,9 @@ def main():
     print()
     print(f"  Bulk ESS per gradient eval: {ess_per_grad:.4f}")
 
+    wall_time_s = time.perf_counter() - t0
+    print(f"\n  Wall-clock time: {wall_time_s:.2f}s")
+
     # --- Save results ---
     NUTS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -152,7 +166,9 @@ def main():
         "num_warmup": NUM_WARMUP,
         "num_samples": NUM_SAMPLES,
         "adapted_step_size": float(parameters["step_size"]),
+        "wall_time_s": wall_time_s,
         "mean_acceptance_rate": float(acceptance),
+        "warmup_grad_evals": warmup_grad_evals,
         "total_grad_evals": int(total_grad_evals),
         "mean_integration_steps": float(num_integration_steps.mean()),
         "max_integration_steps": int(max_steps),

@@ -8,6 +8,7 @@ is chosen randomly with equal probability.
 
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -32,12 +33,12 @@ SEO_OUTPUT_DIR = OUTPUT_DIR / "seo"
 # Local exploration kernel: "mala" (gradient-based) or "rwmh" (gradient-free).
 KERNEL = "mala"
 
-NUM_CHAINS = 10
-NUM_SAMPLES = 5000
-NUM_WARMUP = 1000
+NUM_CHAINS = 15
+NUM_SAMPLES = 10000
+NUM_WARMUP = 0
 # Per-chain step sizes: larger for hot chains (broad exploration), smaller for cold.
 STEP_SIZE_HOT = 0.5
-STEP_SIZE_COLD = 0.05
+STEP_SIZE_COLD = 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +88,7 @@ def rwmh_kernel_generator(log_p, step_size):
 def main():
     kernel_type = KERNEL
 
-    sample_key = jax.random.PRNGKey(0)
+    init_key, sample_key = jax.random.split(jax.random.PRNGKey(0))
 
     # --- Model ---
     log_density_fn = make_log_density()
@@ -116,11 +117,12 @@ def main():
     )
 
     # --- Initialize: all chains start at origin ---
-    x0 = jnp.zeros((NUM_CHAINS, 2))
+    x0 = jax.random.uniform(init_key, shape=(NUM_CHAINS, 2), minval=-10.0, maxval=10.0)
 
     # --- Run SEO sampling loop ---
     print(f"Running SEO ({kernel_type.upper()} local kernel, {NUM_CHAINS} chains, "
           f"{NUM_SAMPLES} samples, {NUM_WARMUP} warmup)...")
+    t0 = time.perf_counter()
     samples, rejection_rates = pt_jax.swap.seo_sampling_loop(
         key=sample_key,
         x0=x0,
@@ -131,6 +133,7 @@ def main():
     )
     # samples:         (NUM_SAMPLES, NUM_CHAINS, 2)
     # rejection_rates: (NUM_SAMPLES, NUM_CHAINS - 1)
+    wall_time_s = time.perf_counter() - t0
 
     mean_swap_rejection = np.array(rejection_rates.mean(axis=0))  # (NUM_CHAINS - 1,)
 
@@ -158,11 +161,11 @@ def main():
     if kernel_type == "mala":
         # MALA: one gradient evaluation per chain per local step.
         # Swap moves require only log-density evaluations, not gradients.
-        total_cost = NUM_CHAINS * NUM_SAMPLES
+        total_cost = NUM_CHAINS * (NUM_WARMUP + NUM_SAMPLES)
         cost_label = "gradient_evals"
     else:
         # RWMH: one log-density evaluation per chain per local step.
-        total_cost = NUM_CHAINS * NUM_SAMPLES
+        total_cost = NUM_CHAINS * (NUM_WARMUP + NUM_SAMPLES)
         cost_label = "log_density_evals"
 
     # ArviZ summary on cold chain (treated as a single chain)
@@ -196,6 +199,7 @@ def main():
     print(summary.to_string())
     print()
     print(f"  Bulk ESS per {cost_label.replace('_', '-')}: {ess_per_cost:.4f}")
+    print(f"\n  Wall-clock time: {wall_time_s:.2f}s")
 
     # --- Save results ---
     SEO_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -205,6 +209,7 @@ def main():
 
     diagnostics = {
         "sampler": "SEO_ParallelTempering",
+        "wall_time_s": wall_time_s,
         "kernel_type": kernel_type,
         "num_chains": NUM_CHAINS,
         "num_warmup": NUM_WARMUP,

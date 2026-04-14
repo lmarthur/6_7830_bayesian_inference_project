@@ -8,6 +8,7 @@ are drawn from the prior and at lambda=1 they approximate the target.
 
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -30,7 +31,8 @@ SMC_OUTPUT_DIR = OUTPUT_DIR / "smc"
 NUM_PARTICLES = 2000
 TARGET_ESS = 0.5    # target ESS fraction for adaptive temperature step
 NUM_MCMC_STEPS = 10  # RMH refreshment steps per SMC iteration
-SIGMA_PRIOR = 15.0   # prior std dev — wide enough to cover modes at radius ~7
+PRIOR_LOW = -10.0    # uniform prior bounds — matches initialization range of other algorithms
+PRIOR_HIGH = 10.0
 SIGMA_PROPOSAL = 1.0  # RMH proposal std dev — roughly one mode width
 MAX_STEPS = 500      # safety cap on SMC iterations
 
@@ -47,7 +49,7 @@ def main():
     # At lambda=0: sample from logprior (broad Gaussian)
     # At lambda=1: sample from logprior + loglikelihood = log_target
     def logprior_fn(x):
-        return jax.scipy.stats.norm.logpdf(x, 0.0, SIGMA_PRIOR).sum()
+        return jax.scipy.stats.uniform.logpdf(x, loc=PRIOR_LOW, scale=PRIOR_HIGH - PRIOR_LOW).sum()
 
     def loglikelihood_fn(x):
         return log_density_fn(x) - logprior_fn(x)
@@ -79,8 +81,10 @@ def main():
 
     # --- Initialize particles from prior ---
     init_key, loop_key = jax.random.split(rng_key)
-    initial_positions = jax.random.normal(init_key, shape=(NUM_PARTICLES, 2)) * SIGMA_PRIOR
+    initial_positions = jax.random.uniform(init_key, shape=(NUM_PARTICLES, 2), minval=PRIOR_LOW, maxval=PRIOR_HIGH)
     state = smc.init(initial_positions)
+
+    t0 = time.perf_counter()
 
     # --- Run SMC loop (adaptive schedule; stop when lambda reaches 1) ---
     step_fn = jax.jit(smc.step)
@@ -105,12 +109,20 @@ def main():
     else:
         print(f"  Completed in {num_steps} SMC steps.")
 
+    wall_time_s = time.perf_counter() - t0
+
     # --- Final particles and weights ---
     particles = np.array(state.particles)   # (NUM_PARTICLES, 2)
     weights = np.array(state.weights)       # already normalised
 
     final_ess = float(1.0 / np.sum(weights ** 2))
     log_nc_total = float(np.sum(all_log_nc))
+
+    # Total log-density evaluations:
+    # Each SMC step performs NUM_MCMC_STEPS RMH moves per particle (1 logp eval each)
+    # plus 2 evaluations per particle for the incremental weight update (loglikelihood
+    # at old and new temperature).
+    total_log_density_evals = num_steps * NUM_PARTICLES * (NUM_MCMC_STEPS + 2)
 
     # --- Mode weight recovery (weighted) ---
     means_np = np.array(DEFAULT_MEANS)
@@ -126,6 +138,8 @@ def main():
     print(f"  Final lambda:             {float(state.tempering_param):.6f}")
     print(f"  Log normalizing constant: {log_nc_total:.3f}")
     print(f"  Final ESS:                {final_ess:.1f} / {NUM_PARTICLES}")
+    print(f"  Total log-density evals:  {int(total_log_density_evals)}")
+    print(f"  Wall-clock time:          {wall_time_s:.2f}s")
     print()
     true_weights = np.array(DEFAULT_WEIGHTS)
     print("  Mode weight recovery (empirical vs true):")
@@ -152,12 +166,15 @@ def main():
         "num_particles": NUM_PARTICLES,
         "target_ess": TARGET_ESS,
         "num_mcmc_steps_per_iter": NUM_MCMC_STEPS,
-        "sigma_prior": SIGMA_PRIOR,
+        "prior_low": PRIOR_LOW,
+        "prior_high": PRIOR_HIGH,
         "sigma_proposal": SIGMA_PROPOSAL,
+        "wall_time_s": wall_time_s,
         "num_smc_steps": num_steps,
         "final_tempering_param": float(state.tempering_param),
         "log_normalizing_constant": log_nc_total,
         "final_ess": final_ess,
+        "total_log_density_evals": int(total_log_density_evals),
         "tempering_schedule": [float(x) for x in all_lambdas],
         "log_nc_increments": [float(x) for x in all_log_nc],
         "mode_weights": mode_weights.tolist(),
