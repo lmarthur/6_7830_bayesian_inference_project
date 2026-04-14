@@ -1,23 +1,25 @@
 {
   "sampler": "NUTS",
   "num_chains": 5,
-  "num_warmup": 1000,
+  "num_warmup": 0,
   "num_samples": 5000,
-  "adapted_step_size": 0.20980678498744965,
-  "mean_acceptance_rate": 0.928691565990448,
-  "total_grad_evals": 118632,
-  "mean_integration_steps": 4.74528,
-  "max_integration_steps": 31,
-  "tree_depth_saturation": 0.0002,
+  "adapted_step_size": 0.5,
+  "wall_time_s": 2.665963311002997,
+  "mean_acceptance_rate": 0.9745010733604431,
+  "warmup_grad_evals": 0,
+  "total_grad_evals": 156496,
+  "mean_integration_steps": 6.25984,
+  "max_integration_steps": 63,
+  "tree_depth_saturation": 8e-05,
   "mode_weights": [
-    0.13216,
-    0.07036,
-    0.15092,
-    0.10132,
-    0.1952,
-    0.08556,
+    0.164,
+    0.0662,
+    0.17052,
+    0.08924,
+    0.1842,
+    0.06672,
     0.18308,
-    0.0814
+    0.07604
   ],
   "true_mode_weights": [
     0.17499999701976776,
@@ -30,50 +32,50 @@
     0.07500000298023224
   ],
   "inter_mode_transitions": [
-    196,
-    179,
-    157,
-    199,
-    213
+    160,
+    183,
+    158,
+    170,
+    168
   ],
   "stuck_chains": [],
-  "bulk_ess_per_grad_eval": 0.0020230629172567267,
+  "bulk_ess_per_grad_eval": 0.001885032205295982,
   "arviz_summary": {
     "mean": {
-      "x1": -0.614,
-      "x2": -0.207
+      "x1": -0.22,
+      "x2": -0.015
     },
     "sd": {
-      "x1": 4.984,
-      "x2": 5.07
+      "x1": 5.026,
+      "x2": 5.074
     },
     "hdi_3%": {
-      "x1": -7.97,
-      "x2": -7.97
+      "x1": -7.996,
+      "x2": -7.999
     },
     "hdi_97%": {
-      "x1": 7.691,
-      "x2": 7.856
+      "x1": 7.846,
+      "x2": 7.925
     },
     "mcse_mean": {
-      "x1": 0.489,
-      "x2": 0.449
+      "x1": 0.358,
+      "x2": 0.604
     },
     "mcse_sd": {
-      "x1": 0.12,
-      "x2": 0.111
+      "x1": 0.124,
+      "x2": 0.123
     },
     "ess_bulk": {
-      "x1": 101.0,
-      "x2": 139.0
+      "x1": 214.0,
+      "x2": 81.0
     },
     "ess_tail": {
-      "x1": 573.0,
-      "x2": 846.0
+      "x1": 1033.0,
+      "x2": 445.0
     },
     "r_hat": {
-      "x1": 1.05,
-      "x2": 1.02
+      "x1": 1.02,
+      "x2": 1.06
     }
   }
 }

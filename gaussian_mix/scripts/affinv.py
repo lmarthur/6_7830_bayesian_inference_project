@@ -4,6 +4,7 @@ Run Affine Invariant MCMC on the 2D Gaussian mixture model and save trace plots.
 
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -22,9 +23,9 @@ from model import make_log_density, plot_model, OUTPUT_DIR, DEFAULT_MEANS, DEFAU
 
 AFFINV_OUTPUT_DIR = OUTPUT_DIR / "affinv"
 
-NUM_BURNIN = 1000
-NUM_SAMPLES = 6000
-NUM_WALKERS = 5
+NUM_BURNIN = 0
+NUM_SAMPLES = 2500
+NUM_WALKERS = 32
 NDIM = 2
 
 
@@ -36,8 +37,10 @@ def main():
     print("Plotting model...")
     plot_model()
 
+    t0 = time.perf_counter()
+
     # --- Initialize walkers from random starting positions ---
-    coords = jax.random.normal(init_key, shape=(NUM_WALKERS, NDIM))
+    coords = jax.random.uniform(init_key, shape=(NUM_WALKERS, NDIM), minval=-10.0, maxval=10.0)
 
     # --- Initialize sampler ---
     sampler = emcee_jax.EnsembleSampler(log_density_fn)
@@ -112,6 +115,9 @@ def main():
     print()
     print(f"  Bulk ESS per log-density eval: {ess_per_logp_eval:.4f}")
 
+    wall_time_s = time.perf_counter() - t0
+    print(f"\n  Wall-clock time: {wall_time_s:.2f}s")
+
     # --- Save results ---
     AFFINV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -123,6 +129,7 @@ def main():
         "num_walkers": NUM_WALKERS,
         "num_burnin": NUM_BURNIN,
         "num_samples": NUM_SAMPLES,
+        "wall_time_s": wall_time_s,
         "mean_acceptance_rate": float(acceptance),
         "total_log_density_evals": int(total_log_density_evals),
         "bulk_ess_per_logp_eval": float(ess_per_logp_eval),

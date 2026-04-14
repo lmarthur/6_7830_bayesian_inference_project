@@ -1,0 +1,194 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{parskip}
+\usepackage{hyperref}
+\setlist{noitemsep, topsep=3pt, leftmargin=*}
+
+\title{Beyond the Shadow of a Doubt: Benchmarking MCMC Sampling Algorithms
+  for Multimodal Astrophysical Inference\\[0.5em]
+  \large Progress Report}
+\author{Lucas Arthur \and Samson Mercier}
+\date{April 13, 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+As astrophysics enters the era of petabyte-scale datasets, the choice of
+inference algorithm and implementation for a research problem could make the
+difference between an intractable or incorrect analysis and a major scientific
+discovery. The high dimensionality and multi-modality of posterior distributions
+can pose problems for popular inference tools. To ensure that the astrophysics
+community is fully leveraging available inference algorithms, we benchmark a
+set of widespread tools from across the astrophysical literature. We benchmark
+eight inference algorithms---random walk Metropolis-Hastings (RWMH),
+affine-invariant ensemble sampling, parallel tempering, NUTS, SMC with
+tempering, non-reversible parallel tempering, ensemble Kalman sampling, and
+nested sampling (as a non-MCMC comparator)---on two test problems: a synthetic
+8-component 2D Gaussian mixture with known ground truth, and a simulated
+exoplanet transit with stellar spots. All experiments run on AMD EPYC 9474F
+48-core CPUs and Nvidia L40S GPUs using JAX to ensure
+implementation-agnostic comparison. We evaluate each sampler on mode
+recovery, posterior accuracy, and computational efficiency (ESS per unit compute
+time), and will produce a concrete set of recommendations for practitioners.
+\end{abstract}
+
+% -----------------------------------------------------------------------
+\section{Project Overview}
+
+The central question of this project is: \textit{Which parallelizable
+MCMC-family samplers most reliably recover multimodal posteriors in
+astrophysical settings, and at what computational cost?} We benchmark eight
+algorithms: RWMH, affine-invariant ensemble sampling \cite{goodman2010,emcee},
+reversible parallel tempering (SEO) \cite{vousden2016}, non-reversible parallel
+tempering (DEO) \cite{syed2019}, NUTS, SMC with tempering \cite{delmoral2006},
+ensemble Kalman sampling \cite{garbuno2020}, and nested sampling
+\cite{speagle2020} as a non-MCMC reference.
+
+We evaluate each sampler on two test problems. The first is an 8-component 2D
+Gaussian mixture with fully known ground-truth modes, weights, and covariances,
+enabling precise measurement of mode recovery and posterior accuracy. The second
+is a simulated exoplanet transit with stellar spots, a problem known to produce
+multimodal posteriors, which tests each sampler in a realistic astrophysical
+setting.
+
+The primary evaluation criteria are: mode recovery (fraction of modes recovered,
+recovered mode weights), posterior accuracy (Wasserstein-2 distance from ground
+truth where available), and computational efficiency (ESS per log-density
+evaluation and ESS per wall-clock second). Secondary diagnostics
+include $\hat{R}$, acceptance rates, and---for parallel tempering variants---swap
+acceptance rates and round-trip counts between temperature levels.
+
+The full implementation stack is JAX~\cite{jax2018github} / BlackJAX~\cite{blackjax} /
+NumPyro~\cite{numpyro}, ensuring hardware-accelerated, implementation-agnostic
+comparison across all algorithms.
+
+% -----------------------------------------------------------------------
+\section{Division of Labor Update}
+
+The division of labor has been reshuffled relative to the original proposal.
+Lucas Arthur has taken ownership of both parallel tempering variants---reversible
+SEO and non-reversible DEO---in addition to his originally assigned algorithms
+(NUTS and SMC with tempering). This consolidation arose naturally because the two
+tempering variants share substantial infrastructure (temperature ladder
+management, swap kernels, diagnostic logging), and keeping them under a single
+owner reduced integration overhead.
+
+Samson Mercier has taken on all forward model development, including
+implementation and validation of the stellar spot transit model against external
+transit-fitting codes, in addition to his originally assigned algorithms (RWMH,
+affine-invariant MCMC, and nested sampling).
+
+The ensemble Kalman sampler (EKS) is deprioritized. Implementation is on hold
+until all other samplers have been run and results collated across both test
+problems. Samson Mercier will implement it if time permits; it will be omitted
+from the final comparison if it is not ready in time.
+
+% -----------------------------------------------------------------------
+\section{Progress to Date}
+
+\subsection{Gaussian Mixture Model --- Substantially Complete}
+
+Seven of the eight samplers have been fully implemented and run on the Gaussian
+mixture problem: RWMH, affine-invariant MCMC, reversible PT (SEO),
+non-reversible PT (DEO), NUTS, SMC with tempering, and nested sampling. EKS is
+the sole missing algorithm; it is deferred pending completion of transit model
+runs.
+
+Each sampler produces the following outputs: posterior samples in a
+standardized format, corner plots, and a diagnostics record containing ESS,
+$\hat{R}$, acceptance rates, recovered mode weights, and inter-mode transition
+counts (for chain-based methods).
+
+\subsection{Stellar Spot Transit Model --- Forward Model Complete, Sampling Not
+Yet Started}
+
+The transit forward model has been implemented using the \texttt{sajax} library
+with a NumPyro likelihood and a BlackJAX-compatible log-density interface. The
+inference problem is to recover three spot parameters---latitude, longitude, and
+radius---from a synthetic noisy light curve generated from a known ground-truth
+configuration. This is a reduced scope relative to the proposal, which described
+a 12-parameter model; the three-parameter version was chosen to keep the transit
+problem tractable while preserving the multimodal structure of interest. Samson
+Mercier has validated the forward model against independent transit-fitting codes.
+
+Sampler scripts for the transit problem have not yet been written. Writing and
+running these scripts is the primary remaining task.
+
+% -----------------------------------------------------------------------
+\section{Preliminary Results: Gaussian Mixture}
+
+Detailed quantitative analysis is reserved for the final report; we summarize
+high-level qualitative observations here. Notable observations include:
+
+\begin{itemize}
+  \item \textbf{RWMH} shows poor mixing between modes. The chain rarely crosses
+    the low-density region separating mixture components, resulting in
+    substantially fewer inter-mode transitions and lower ESS per evaluation than
+    all other methods.
+  \item \textbf{Non-reversible PT (DEO)} achieves substantially more inter-mode
+    transitions than reversible PT (SEO) at matched compute budgets, consistent
+    with the theoretical prediction that non-reversible temperature swaps improve
+    round-trip rates \cite{syed2019}.
+  \item \textbf{Nested sampling} reliably recovers all eight modes. Its ESS per
+    log-density evaluation is lower than gradient-based methods, but it provides
+    an accurate evidence estimate and serves as a robust reference.
+  \item \textbf{NUTS} and \textbf{SMC with tempering} show strong ESS per
+    evaluation on this low-dimensional problem; their relative performance on the
+    higher-dimensional transit model remains to be seen.
+\end{itemize}
+
+% -----------------------------------------------------------------------
+\section{Revised Plan and Remaining Tasks}
+
+Table~\ref{tab:plan} lists the remaining tasks and internal deadlines.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}p{0.60\textwidth}p{0.14\textwidth}p{0.10\textwidth}@{}}
+\toprule
+\textbf{Task} & \textbf{Owner} & \textbf{Target} \\
+\midrule
+Run all 7 implemented samplers on transit model & Both   & Apr 25 \\
+Collate all results; build comparison tables    & Both   & Apr 25 \\
+Implement EKS (if time permits)                 & Samson & Apr 25 \\
+Produce final figures                           & Both   & Apr 28 \\
+Write final report                              & Both   & May 1  \\
+\bottomrule
+\end{tabular}
+\caption{Remaining tasks and internal deadlines.}
+\label{tab:plan}
+\end{table}
+
+% -----------------------------------------------------------------------
+\section{Planned Figures and Evaluation Framework}
+
+Comparing the eight algorithms requires care because they produce
+fundamentally different outputs: correlated samples (RWMH, PT, NUTS), weighted
+particle sets (SMC, nested sampling), or continuously evolved ensembles (EKS,
+affine-invariant). We therefore report efficiency as ESS per log-likelihood
+evaluation, the most universally applicable unit of compute. For chain-based
+methods, warm-up evaluations are included in the denominator to give an honest
+accounting of total compute. The primary mode-recovery metrics are the per-mode
+weight error $|\hat{w}_k - w_k|$, total variation distance from the true
+mixture, and (for chain methods) inter-mode transition count. For the Gaussian
+mixture we also report Wasserstein-2 distance to ground truth; for the transit
+model we use nested-sampling output as a reference distribution.
+
+Anticipated figures: (1) KDE posterior overlays for all samplers on the 2D
+mixture against the true density; (2) per-mode weight recovery bar charts;
+(3) ESS per likelihood evaluation across samplers and both problems; (4)
+convergence curves (Wasserstein distance vs.\ evaluations); (5) PT swap
+acceptance and round-trip rates for SEO vs.\ DEO \cite{syed2019}; (6) transit
+model corner plots per sampler; (7) a summary table of $\hat{R}$, MCSE,
+ESS/eval, and modes recovered across both problems.
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

@@ -1,0 +1,49 @@
+This is BibTeX, Version 0.99e (TeX Live 2026/Arch Linux)
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: progress.aux
+The style file: plain.bst
+Database file #1: refs.bib
+Warning--entry type for "jax2018github" isn't style-file defined
+--line 131 of file refs.bib
+You've used 10 entries,
+            2118 wiz_defined-function locations,
+            557 strings with 5921 characters,
+and the built_in function-call counts, 3702 in all, are:
+= -- 352
+> -- 229
+< -- 0
++ -- 90
+- -- 80
+* -- 301
+:= -- 638
+add.period$ -- 29
+call.type$ -- 10
+change.case$ -- 70
+chr.to.int$ -- 0
+cite$ -- 10
+duplicate$ -- 98
+empty$ -- 257
+format.name$ -- 80
+if$ -- 734
+int.to.chr$ -- 0
+int.to.str$ -- 10
+missing$ -- 7
+newline$ -- 52
+num.names$ -- 20
+pop$ -- 69
+preamble$ -- 1
+purify$ -- 60
+quote$ -- 0
+skip$ -- 71
+stack$ -- 0
+substring$ -- 231
+swap$ -- 10
+text.length$ -- 0
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 40
+warning$ -- 0
+while$ -- 34
+width$ -- 12
+write$ -- 107
+(There was 1 warning)

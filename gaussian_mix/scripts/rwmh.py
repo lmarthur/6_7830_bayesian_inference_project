@@ -4,6 +4,7 @@ Run Random Walk Metropolis-Hastings on the 2D Gaussian mixture model and save tr
 
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -22,9 +23,9 @@ from model import make_log_density, plot_model, OUTPUT_DIR, DEFAULT_MEANS, DEFAU
 
 RWMH_OUTPUT_DIR = OUTPUT_DIR / "rwmh"
 
-NUM_BURNIN = 1000
-NUM_SAMPLES = 5000
-NUM_CHAINS = 5
+NUM_BURNIN = 0
+NUM_SAMPLES = 10000
+NUM_CHAINS = 10
 STEP_SIZE = 0.5
 
 
@@ -47,29 +48,37 @@ def main():
     print("Plotting model...")
     plot_model()
 
+    t0 = time.perf_counter()
+
     # --- Initialize chains from random starting positions ---
-    initial_positions = jax.random.normal(init_key, shape=(NUM_CHAINS, 2))
+    initial_positions = jax.random.uniform(init_key, shape=(NUM_CHAINS, 2), minval=-10.0, maxval=10.0)
 
     kernel = blackjax.rmh(log_density_fn, proposal_generator=blackjax.mcmc.random_walk.normal(sigma=STEP_SIZE))
     init_fn = jax.vmap(kernel.init)
     initial_states = init_fn(initial_positions)
 
-    # --- Burn-in (discard, just to move chains away from starting positions) ---
-    print(f"Running burn-in ({NUM_BURNIN} steps)...")
-    burnin_keys = jax.random.split(burnin_key, NUM_CHAINS)
-
     @jax.vmap
     def run_chain(rng_key, initial_state):
         return inference_loop(rng_key, kernel.step, initial_state, NUM_BURNIN)
 
-    burnin_states, _ = run_chain(burnin_keys, initial_states)
-    # Grab the last state of each chain as the starting point for sampling
-    post_burnin_states = jax.tree.map(lambda x: x[:, -1], burnin_states)
+    # --- Burn-in (discard, just to move chains away from starting positions) ---
+    if NUM_BURNIN > 0:
+        print(f"Running burn-in ({NUM_BURNIN} steps)...")
+        burnin_keys = jax.random.split(burnin_key, NUM_CHAINS)
+        burnin_states, _ = run_chain(burnin_keys, initial_states)
+        post_burnin_states = jax.tree.map(lambda x: x[:, -1], burnin_states)
+    else:
+        post_burnin_states = initial_states
 
     # --- Sample ---
     print(f"Sampling ({NUM_SAMPLES} steps, {NUM_CHAINS} chains)...")
+
+    @jax.vmap
+    def run_sample_chain(rng_key, initial_state):
+        return inference_loop(rng_key, kernel.step, initial_state, NUM_SAMPLES)
+
     chain_sample_keys = jax.random.split(sample_key, NUM_CHAINS)
-    all_states, all_infos = run_chain(chain_sample_keys, post_burnin_states)
+    all_states, all_infos = run_sample_chain(chain_sample_keys, post_burnin_states)
 
     # all_states.position: (NUM_CHAINS, NUM_SAMPLES, 2)
     samples = np.array(all_states.position)
@@ -100,7 +109,7 @@ def main():
 
     # Cost metric: RWMH is gradient-free; each step requires exactly 1 log-density
     # evaluation per chain (one proposal evaluated, no leapfrog integration).
-    total_log_density_evals = NUM_CHAINS * NUM_SAMPLES
+    total_log_density_evals = NUM_CHAINS * (NUM_BURNIN + NUM_SAMPLES)
 
     # ArviZ summary: R-hat, bulk/tail ESS, MCSE
     idata = az.from_dict(
@@ -133,6 +142,9 @@ def main():
     print()
     print(f"  Bulk ESS per log-density eval: {ess_per_logp_eval:.4f}")
 
+    wall_time_s = time.perf_counter() - t0
+    print(f"\n  Wall-clock time: {wall_time_s:.2f}s")
+
     # --- Save results ---
     RWMH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -147,6 +159,7 @@ def main():
         "adapted_step_size": float(STEP_SIZE),
         "mean_acceptance_rate": float(acceptance),
         "total_log_density_evals": int(total_log_density_evals),
+        "wall_time_s": wall_time_s,
         "bulk_ess_per_logp_eval": float(ess_per_logp_eval),
         "mode_weights": mode_weights.tolist(),
         "true_mode_weights": np.array(DEFAULT_WEIGHTS).tolist(),

@@ -5,7 +5,6 @@ requires-python = ">=3.11"
 dependencies = [
     "blackjax",
     "numpyro",
-    "exojax",
     "numpy",
     "matplotlib",
     "scipy",
@@ -17,8 +16,12 @@ dependencies = [
     "jaxns",
     "tensorflow",
     "emcee_jax @ git+https://github.com/SamMerc/emcee-jax.git",
-    "sajax @ git+https://github.com/SamMerc/sajax.git"
+    "sajax @ git+https://github.com/SamMerc/sajax.git",
+    "pt_jax @ git+https://github.com/lmarthur/pt-jax.git"
 ]
+
+[tool.setuptools]
+packages = []
 
 [tool.pytest.ini_options]
 addopts = "--cov --cov-report=term-missing"

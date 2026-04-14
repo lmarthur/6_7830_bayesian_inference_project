@@ -4,6 +4,7 @@ Run Nested Sampling (JAXNS) on the 2D Gaussian mixture model and save trace plot
 
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -67,8 +68,10 @@ def main():
     ns = jaxns.NestedSampler(model=model,max_samples=MAX_SAMPLES,num_live_points=NUM_LIVE_POINTS)#,difficult_model=True)
 
     print("Running nested sampling...")
+    t0 = time.perf_counter()
     termination_reason, state = jax.jit(ns)(run_key)
     results = ns.to_results(termination_reason=termination_reason, state=state)
+    wall_time_s = time.perf_counter() - t0
 
     print(f"\nTermination reason: {termination_reason}")
 
@@ -122,6 +125,7 @@ def main():
     print(f"  Total likelihood evaluations:  {total_likelihood_evals}")
     print(f"  Likelihood evals / sample:     {results.total_num_likelihood_evaluations / max(1, int(results.total_num_samples)):.1f}")
     print(f"  ESS per likelihood eval:       {ess_per_likelihood_eval:.4f}")
+    print(f"  Wall-clock time:               {wall_time_s:.2f}s")
     print()
     true_weights = np.array(DEFAULT_WEIGHTS)
     print(f"  Mode weight recovery (empirical vs true):")
@@ -140,6 +144,7 @@ def main():
 
     diagnostics = {
         "sampler": "NestedSampling_JAXNS",
+        "wall_time_s": wall_time_s,
         "num_posterior_draws": NUM_POSTERIOR_DRAWS,
         "prior_scale": PRIOR_SCALE,
         "log_Z_mean": log_z,
