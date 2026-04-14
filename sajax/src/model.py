@@ -1,15 +1,20 @@
 """
 Model of an exoplanetary transit with a spot crossing for sampler benchmarking.
 
-Default configuration: a star of radius 1 with quadratic limb darkening and a single circular spot of radius 0.2,
-centered at (0.5, 0) on the stellar disk. A planet of radius 0.1 transits across the star along the x-axis,
-with mid-transit at (0, 0) and total duration of 1 time unit. The spot crossing occurs at t=0.2, causing a temporary brightening in the light curve.
-The target distribution is the posterior over the spot parameters (position and radius) given a noisy light curve observation.
-This model is designed to be multimodal due to the symmetry of the stellar disk and the degeneracy between spot size and contrast, making it a challenging test case for samplers.
-The likelihood is defined by the difference between the observed light curve and the model-predicted light curve, which depends on the spot parameters.
+Default configuration: a star of radius 1 with quadratic limb darkening,
+a single circular spot and a facula on the stellar disk. A planet transits
+the star, with the transit light curve computed via jaxoplanet and the
+stellar activity modulation computed via sajax.
 
-A NumPyro model is used to define the joint distribution over the spot parameters and the observed data,
-and numpyro.infer.util.log_density is used to extract a BlackJAX-compatible log-density function for sampling.
+The combined light curve is:
+    lc_total = lc_activity * (1 + lc_transit)
+
+where lc_activity comes from sajax (rotational modulation from spots/faculae)
+and lc_transit comes from jaxoplanet (limb-darkened transit model).
+
+A NumPyro model is used to define the joint distribution over the spot
+parameters and the observed data, and numpyro.infer.util.log_density is
+used to extract a BlackJAX-compatible log-density function for sampling.
 """
 
 from pathlib import Path
@@ -22,70 +27,191 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer.util import log_density
+import astropy.units as u
+from astropy.constants import G
+from jaxoplanet.orbits.keplerian import System, Central
+from jaxoplanet.light_curves import limb_dark_light_curve
 
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
+
+# ---------------------------------------------------------------------------
+# Planet transit parameters (jaxoplanet)
+# ---------------------------------------------------------------------------
+#%%%% Define G in units needed now to avoid JAX tracing issues
+G_solar_units = G.to(u.Rsun**3 / (u.Msun * u.day**2)).value
+R_star = (1.0 * u.R_sun).value
+
+TRUE_PLANET_RADIUS = 0.1       # planet radius in stellar radii (Rp/Rs)
+TRUE_P_ORB         = 1.0                # planet orbital period [days]
+A_METERS           = ( (G.value * (1.0 * u.M_sun).to(u.kg).value * (TRUE_P_ORB * 24 * 3600)**2)/(4 * jnp.pi**2) )**(1/3)           
+TRUE_SEMI_MAJOR    = A_METERS / (1.0 * u.R_sun).to(u.m).value # semi-major axis
+TRUE_INCLINATION   = jnp.deg2rad(90.0)       # orbital inclination [degrees]
+TRUE_ECCENTRICITY  = 0.0        # orbital eccentricity
+TRUE_ARG_PERIAPSIS = 0.0        # argument of periastron [degrees]
+TRUE_LDC_U1        = 0.4              # limb-darkening for transit (matches sajax)
+TRUE_LDC_U2        = 0.2
+TRUE_T0_TRANSIT    = 0.0            # mid-transit time [days]
+
+#%%%% Calculate transit duration
+# Convert angles to radians
+# Impact parameter (eccentricity-corrected)
+TRUE_IMPACT_PARAM = (
+    (TRUE_SEMI_MAJOR * jnp.cos(TRUE_INCLINATION)) / R_star
+    * (1 - TRUE_ECCENTRICITY**2) / (1 + TRUE_ECCENTRICITY * jnp.sin(TRUE_ARG_PERIAPSIS))
+)
+# Argument inside arcsin
+arg = (
+    (1/TRUE_SEMI_MAJOR)
+    * jnp.sqrt((1 + TRUE_PLANET_RADIUS)**2 - TRUE_IMPACT_PARAM**2)
+    / jnp.sin(TRUE_INCLINATION)
+)
+# Numerical safety
+arg = np.clip(arg, -1.0, 1.0)
+# Transit duration
+TRUE_T14_TRANSIT = (
+    (TRUE_P_ORB / jnp.pi)
+    * jnp.sqrt(1 - TRUE_ECCENTRICITY**2) / (1 + TRUE_ECCENTRICITY * jnp.sin(TRUE_ARG_PERIAPSIS * jnp.pi / 180.0))
+    * jnp.arcsin(arg)
+)
 
 # ---------------------------------------------------------------------------
 # Fixed observation setup — shared across all sampler scripts
 # ---------------------------------------------------------------------------
 
-# Rotational phases: 60 evenly spaced points over one full rotation
-N_PHASES = 60
-PHASES_ROT = np.linspace(0, 360, N_PHASES, endpoint=False)
+# Time / phase setup
+low_t = -3.5*TRUE_T14_TRANSIT                                           #days
+high_t = 3.5*TRUE_T14_TRANSIT                                           #days
+exposure_time = 250                                                     #seconds
+num_t = jnp.floor((((high_t - low_t) * 24 * 3600)/exposure_time))       #number of points
+TIMES = jnp.linspace(low_t, high_t, int(num_t))
 
-# Synthetic flat spectra — a single wavelength bin is enough for a broadband
-# benchmark. sajax needs arrays, so we pass 1-element arrays.
-# flux_quiet = 1.0 (normalised stellar continuum)
-# flux_active = 0.7 (spot is 30% darker than the quiet photosphere)
-WAVELENGTH = np.array([550.0])   # nm, single broadband bin
+# Rotational phases for sajax [degrees]
+TRUE_P_ROT = 0.5              # stellar rotation period [days]
+PHASES_ROT = (TIMES / TRUE_P_ROT * 360.0) % 360.0
+
+# Synthetic flat spectra — single wavelength bin for broadband benchmark
+WAVELENGTH = np.array([550.0])       # nm
 FLUX_QUIET = np.array([1.0])
-FLUX_ACTIVE = np.array([0.7])
+FLUX_ACTIVE_SPOT = np.array([0.7])   # spot is 30% darker
+FLUX_ACTIVE_FACULA = np.array([1.1]) # facula is 10% brighter
 
 # Fixed stellar / instrument parameters
-PARAMS_STELLAR = dict(
-    u1=0.4,          # quadratic limb-darkening coefficient 1
-    u2=0.2,          # quadratic limb-darkening coefficient 2
-    inc_star=90.0,   # equator-on view — maximises latitude degeneracy
-)
-STELLAR_GRID_SIZE = 100   # stellar radius in pixels; 100 is fast and accurate
-VE = 2.0                  # equatorial velocity [km/s] — sets line broadening
+STELLAR_INC = 90.0          # stellar inclination (equator-on)
 
-# Noise level on the observed light curve (normalised flux units)
-SIGMA_NOISE = 5e-4   # ~500 ppm, realistic for a bright star with good photometry
+STELLAR_GRID_SIZE = 120  # stellar radius in pixels
+VE = 2.0                 # equatorial velocity [km/s]
+
+# Noise level
+SIGMA_NOISE = 300e-6     # ~100 ppm
 
 # ---------------------------------------------------------------------------
-# Ground-truth spot (used to generate synthetic observations)
+# Ground-truth spot and facula
 # ---------------------------------------------------------------------------
-TRUE_LAT  = 20.0    # degrees
-TRUE_LONG = 45.0    # degrees
-TRUE_SIZE = 5.0     # degrees radius
+TRUE_SPOT_LAT = 0.0      # degrees
+TRUE_SPOT_LONG = 5.0      # degrees
+TRUE_SPOT_SIZE = 11.0     # degrees radius
+
+TRUE_FACULA_LAT = -20.0
+TRUE_FACULA_LONG = 165.0
+TRUE_FACULA_SIZE = 16.0
 
 # ---------------------------------------------------------------------------
-# Prior bounds on the three inferred spot parameters
+# Prior bounds: active regions
 # ---------------------------------------------------------------------------
-LAT_MIN,  LAT_MAX  =  -90.0, 90.0   # degrees latitude
-LONG_MIN, LONG_MAX =   0.0, 360.0   # degrees longitude
-SIZE_MIN, SIZE_MAX =   1.0,  90.0   # degrees radius
+LAT_MIN, LAT_MAX = -90.0, 90.0
+LONG_MIN, LONG_MAX = 0.0, 360.0
+SIZE_MIN, SIZE_MAX = 1.0, 90.0
+FLUX_MIN, FLUX_MAX = 0.5, 1.5
+P_ROT_MIN, P_ROT_MAX = 5.0, 20.0
+LDC_U1_MIN, LDC_U1_MAX = 0.0, 1.0
+LDC_U2_MIN, LDC_U2_MAX = 0.0, 1.0
 
+# ---------------------------------------------------------------------------
+# Prior bounds: planet transit
+# ---------------------------------------------------------------------------
+PLANET_RADIUS_MIN, PLANET_RADIUS_MAX = 0.01, 0.3   # Rp/Rs
+SEMI_MAJOR_MIN, SEMI_MAJOR_MAX = 0.0, 1.0          # impact parameter
+INCLINATION_MIN, INCLINATION_MAX = 80.0, 100.0     # inclination [degrees]
+P_ORB_MIN, P_ORB_MAX = 1.0, 10.0                   # orbital period [days]
+ECCENTRICITY_MIN, ECCENTRICITY_MAX = 0.0, 0.5      # eccentricity
+ARG_PERIAPSIS_MIN, ARG_PERIAPSIS_MAX = 0.0, 360.0  # argument of periastron [degrees]
 
-def _call_sajax(ar_lat: float, ar_long: float, ar_size: float) -> jnp.ndarray:
+# ---------------------------------------------------------------------------
+# Transit light curve (jaxoplanet)
+# ---------------------------------------------------------------------------
+
+def _call_jaxoplanet(
+    times: jnp.ndarray,
+    planet_radius: float,
+    semimajor_axis: float,
+    inclination: float,
+    eccentricity: float,
+    arg_periapsis: float,
+    P_orb: float,
+    LDC_u1: float,
+    LDC_u2: float,
+) -> jnp.ndarray:
     """
-    Call sajax's compute_light_curve for a single spot and return the
-    broadband light curve as a 1-D JAX array of shape (N_PHASES,).
+    Compute the planet transit light curve using jaxoplanet.
 
-    sajax expects Python lists for ar_lat / ar_long / ar_size, which is fine
-    because this function is called inside numpyro.infer.util.log_density
-    (no JIT through the sajax call itself).
+    Returns a 1-D array of relative flux (1.0 out of transit, <1.0 during).
     """
+
+    #Define star
+    stellar_rho =  (3 * jnp.pi * semimajor_axis**3)/ ( P_orb**2 * G_solar_units )
+    star = Central(density=stellar_rho)
+
+    #Define planet
+    planet = System(star).add_body(
+        time_transit = TRUE_T0_TRANSIT, #fixed to truth for simplicity
+        period = P_orb,
+        inclination = inclination,
+        eccentricity = eccentricity,
+        omega_peri = arg_periapsis, 
+        radius = (planet_radius * R_star),
+    )
+
+    #Apply limb-darkening and get light curve
+    jaxo_lc = 1.0 + limb_dark_light_curve(planet, [LDC_u1, LDC_u2])(times)
+
+    return jaxo_lc.reshape((-1))
+
+
+# ---------------------------------------------------------------------------
+# Sajax stellar activity light curve
+# ---------------------------------------------------------------------------
+
+def _call_sajax(
+    times: jnp.ndarray,
+    ar_lat: jnp.ndarray,
+    ar_long: jnp.ndarray,
+    ar_size: jnp.ndarray,
+    flux_active: jnp.ndarray,
+    P_rot: float,
+    LDC_u1: float,
+    LDC_u2: float,
+) -> jnp.ndarray:
+    """
+    Call sajax's compute_light_curve and return the broadband light curve
+    as a 1-D JAX array of shape (N_PHASES,).
+    """
+
+    params = dict(
+    ldc_coeffs=[LDC_u1, LDC_u2],  # quadratic limb-darkening [u1, u2]
+    inc_star=STELLAR_INC,         # equator-on view
+    ) 
+
+    phases = (times / P_rot * 360.0) % 360.0
+
     result = sajax.compute_light_curve(
         wavelength=WAVELENGTH,
         flux_quiet=FLUX_QUIET,
-        flux_active=FLUX_ACTIVE,
-        params=PARAMS_STELLAR,
-        ar_lat=[float(ar_lat)],
-        ar_long=[float(ar_long)],
-        ar_size=[float(ar_size)],
-        phases_rot=PHASES_ROT,
+        flux_active=flux_active,
+        params=params,
+        ar_lat=ar_lat.tolist(),
+        ar_long=ar_long.tolist(),
+        ar_size=ar_size.tolist(),
+        phases_rot=phases,
         stellar_grid_size=STELLAR_GRID_SIZE,
         ve=VE,
         ldc_mode="quadratic",
@@ -93,41 +219,157 @@ def _call_sajax(ar_lat: float, ar_long: float, ar_size: float) -> jnp.ndarray:
 
     return jnp.array(result["lc"])
 
+# ---------------------------------------------------------------------------
+# Combined sajax + jaxoplanet
+# ---------------------------------------------------------------------------
+
+def compute_combined_light_curve(
+    times: jnp.ndarray,
+    ar_lat: jnp.ndarray,
+    ar_long: jnp.ndarray,
+    ar_size: jnp.ndarray,
+    flux_active: jnp.ndarray,
+    P_rot: float,
+    planet_radius: float,
+    semimajor_axis: float,
+    inclination: float,
+    eccentricity: float,
+    arg_periapsis: float,
+    P_orb: float,
+    LDC_u1: float,
+    LDC_u2: float,
+) -> jnp.ndarray:
+    """
+    Combined light curve = stellar activity x planet transit.
+    """
+    lc_activity = _call_sajax(
+        times,
+        ar_lat,
+        ar_long, 
+        ar_size, 
+        flux_active,
+        P_rot,
+        LDC_u1,
+        LDC_u2
+    )
+    lc_transit = _call_jaxoplanet(
+        times=times,
+        planet_radius=planet_radius,
+        semimajor_axis=semimajor_axis,
+        inclination=inclination,
+        eccentricity=eccentricity,
+        arg_periapsis=arg_periapsis,
+        P_orb=P_orb,
+        LDC_u1=LDC_u1,
+        LDC_u2=LDC_u2
+    )
+
+    return lc_activity * lc_transit
+
+
+# ---------------------------------------------------------------------------
+# Synthetic observations
+# ---------------------------------------------------------------------------
 
 def generate_observations(seed: int = 0) -> np.ndarray:
     """
-    Generate a synthetic noisy light curve from the ground-truth spot parameters.
-
-    Returns:
-        y_obs: (N_PHASES,) array of observed normalised flux values
+    Generate a synthetic noisy light curve from ground-truth parameters.
+    Includes both stellar activity and planet transit.
     """
-    lc_true = np.array(_call_sajax(TRUE_LAT, TRUE_LONG, TRUE_SIZE))
+
+    lc_true = np.array(
+        compute_combined_light_curve(
+            TIMES,
+            jnp.array([TRUE_SPOT_LAT, TRUE_FACULA_LAT]),
+            jnp.array([TRUE_SPOT_LONG, TRUE_FACULA_LONG]),
+            jnp.array([TRUE_SPOT_SIZE, TRUE_FACULA_SIZE]),
+            np.stack([FLUX_ACTIVE_SPOT, FLUX_ACTIVE_FACULA]),
+            TRUE_P_ROT,
+            TRUE_PLANET_RADIUS,
+            TRUE_SEMI_MAJOR,
+            TRUE_INCLINATION,
+            TRUE_ECCENTRICITY,
+            TRUE_ARG_PERIAPSIS,
+            TRUE_P_ORB,
+            TRUE_LDC_U1,
+            TRUE_LDC_U2,
+        )
+    )
+
     rng = np.random.default_rng(seed)
     noise = rng.normal(0.0, SIGMA_NOISE, size=lc_true.shape)
     return lc_true + noise
 
 
-# Generate observations once at import time so every sampler uses the same data.
+# Generate observations once at import time
 OBS_LIGHT_CURVE = generate_observations(seed=42)
 
 
+# ---------------------------------------------------------------------------
+# NumPyro model
+# ---------------------------------------------------------------------------
+
 def spot_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE)):
     """
-    NumPyro model for the stellar spot posterior.
+    NumPyro model for the stellar spot + facula posterior.
 
-    Latent variables:
-        ar_lat  ~ Uniform(LAT_MIN,  LAT_MAX)   — spot latitude  [degrees]
-        ar_long ~ Uniform(LONG_MIN, LONG_MAX)  — spot longitude [degrees]
-        ar_size ~ Uniform(SIZE_MIN, SIZE_MAX)  — spot radius    [degrees]
+    Latent variables (spot):
+        spot_lat   ~ Uniform(LAT_MIN, LAT_MAX)
+        spot_long  ~ Uniform(LONG_MIN, LONG_MAX)
+        spot_size  ~ Uniform(SIZE_MIN, SIZE_MAX)
+        spot_flux  ~ Uniform(FLUX_MIN, FLUX_MAX)
 
-    Likelihood:
-        y_obs ~ Normal(lc(ar_lat, ar_long, ar_size), SIGMA_NOISE)
+    Latent variables (facula):
+        fac_lat    ~ Uniform(LAT_MIN, LAT_MAX)
+        fac_long   ~ Uniform(LONG_MIN, LONG_MAX)
+        fac_size   ~ Uniform(SIZE_MIN, SIZE_MAX)
+        fac_flux   ~ Uniform(FLUX_MIN, FLUX_MAX)
     """
-    ar_lat  = numpyro.sample("ar_lat",  dist.Uniform(LAT_MIN,  LAT_MAX))
-    ar_long = numpyro.sample("ar_long", dist.Uniform(LONG_MIN, LONG_MAX))
-    ar_size = numpyro.sample("ar_size", dist.Uniform(SIZE_MIN, SIZE_MAX))
+    # Star parameters
+    spot_lat = numpyro.sample("spot_lat", dist.Uniform(LAT_MIN, LAT_MAX))
+    spot_long = numpyro.sample("spot_long", dist.Uniform(LONG_MIN, LONG_MAX))
+    spot_size = numpyro.sample("spot_size", dist.Uniform(SIZE_MIN, SIZE_MAX))
+    spot_flux = numpyro.sample("spot_flux", dist.Uniform(FLUX_MIN, FLUX_MAX))
+    fac_lat = numpyro.sample("fac_lat", dist.Uniform(LAT_MIN, LAT_MAX))
+    fac_long = numpyro.sample("fac_long", dist.Uniform(LONG_MIN, LONG_MAX))
+    fac_size = numpyro.sample("fac_size", dist.Uniform(SIZE_MIN, SIZE_MAX))
+    fac_flux = numpyro.sample("fac_flux", dist.Uniform(FLUX_MIN, FLUX_MAX))
+    P_rot = numpyro.sample("p_rot", dist.Uniform(P_ROT_MIN, P_ROT_MAX))
+    LDC_u1 = numpyro.sample("ldc_u1", dist.Uniform(LDC_U1_MIN, LDC_U1_MAX))
+    LDC_u2 = numpyro.sample("ldc_u2", dist.Uniform(LDC_U2_MIN, LDC_U2_MAX))
 
-    lc_model = _call_sajax(ar_lat, ar_long, ar_size)
+    # Planet parameters
+    planet_radius = numpyro.sample("planet_radius", dist.Uniform(PLANET_RADIUS_MIN, PLANET_RADIUS_MAX))
+    semimajor_axis = numpyro.sample("semimajor_axis", dist.Uniform(SEMI_MAJOR_MIN, SEMI_MAJOR_MAX))
+    inclination = numpyro.sample("inclination", dist.Uniform(INCLINATION_MIN, INCLINATION_MAX))
+    eccentricity = numpyro.sample("eccentricity", dist.Uniform(ECCENTRICITY_MIN, ECCENTRICITY_MAX))
+    arg_periapsis = numpyro.sample("arg_periapsis", dist.Uniform(ARG_PERIAPSIS_MIN, ARG_PERIAPSIS_MAX))
+    P_orb = numpyro.sample("P_orb", dist.Uniform(P_ORB_MIN, P_ORB_MAX))
+
+    # Build arrays
+    ar_lat = jnp.array([spot_lat, fac_lat])
+    ar_long = jnp.array([spot_long, fac_long])
+    ar_size = jnp.array([spot_size, fac_size])
+    flux_active = jnp.stack([
+        jnp.broadcast_to(spot_flux, (1,)),
+        jnp.broadcast_to(fac_flux, (1,)),
+    ])
+
+    lc_model = compute_combined_light_curve(
+        ar_lat, 
+        ar_long, 
+        ar_size, 
+        flux_active,
+        P_rot,
+        planet_radius,
+        semimajor_axis,
+        inclination,
+        eccentricity,
+        arg_periapsis,
+        P_orb,
+        LDC_u1,
+        LDC_u2,
+        )
 
     numpyro.sample(
         "y_obs",
@@ -138,27 +380,41 @@ def spot_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE)):
 
 def make_log_density(y_obs: np.ndarray = OBS_LIGHT_CURVE):
     """
-    Returns a BlackJAX-compatible log-density function for the spot posterior.
+    Returns a BlackJAX-compatible log-density function.
 
-    The returned function accepts a 3-element parameter vector:
-        x = [ar_lat, ar_long, ar_size]
-    and returns scalar log p(x | y_obs).
-
-    Args:
-        y_obs: (N_PHASES,) observed light curve (default: module-level synthetic data)
-
-    Returns:
-        log_density_fn(x): scalar log p(x | y_obs)
+    The returned function accepts a 17-element parameter vector:
+        x = [spot_lat, spot_long, spot_size, spot_flux,
+             fac_lat, fac_long, fac_size, fac_flux, P_rot, 
+             planet_radius, semimajor_axis, inclination, 
+             eccentricity, arg_periapsis, P_orb, LDC_u1, LDC_u2]
     """
     y_obs_jnp = jnp.array(y_obs)
 
     def log_density_fn(x):
-        ar_lat, ar_long, ar_size = x[0], x[1], x[2]
+        params = {
+            "spot_lat": x[0],
+            "spot_long": x[1],
+            "spot_size": x[2],
+            "spot_flux": x[3],
+            "fac_lat": x[4],
+            "fac_long": x[5],
+            "fac_size": x[6],
+            "fac_flux": x[7],
+            "P_rot": x[8],
+            "planet_radius": x[9],
+            "semimajor_axis": x[10],
+            "inclination": x[11],
+            "eccentricity": x[12],
+            "arg_periapsis": x[13], 
+            "P_orb": x[14], 
+            "LDC_u1": x[15],
+            "LDC_u2": x[16],
+        }
         ld, _ = log_density(
             spot_model,
             model_args=(),
             model_kwargs={"y_obs": y_obs_jnp},
-            params={"ar_lat": ar_lat, "ar_long": ar_long, "ar_size": ar_size},
+            params=params,
         )
         return ld
 
@@ -166,54 +422,130 @@ def make_log_density(y_obs: np.ndarray = OBS_LIGHT_CURVE):
 
 
 # ---------------------------------------------------------------------------
-# Default parameter names and ground truth — used by sampler scripts for
-# diagnostics (replaces DEFAULT_MEANS / DEFAULT_WEIGHTS from the Gaussian model)
+# Ground truth dict — for sampler diagnostics
 # ---------------------------------------------------------------------------
-PARAM_NAMES   = ["ar_lat", "ar_long", "ar_size"]
-PARAM_BOUNDS  = jnp.array([[LAT_MIN, LAT_MAX], [LONG_MIN, LONG_MAX], [SIZE_MIN, SIZE_MAX]])
-TRUE_PARAMS   = jnp.array([TRUE_LAT, TRUE_LONG, TRUE_SIZE])
-NDIM          = 3
+GROUND_TRUTH = {
+    "spot_lat": TRUE_SPOT_LAT,
+    "spot_long": TRUE_SPOT_LONG,
+    "spot_size": TRUE_SPOT_SIZE,
+    "spot_flux": FLUX_ACTIVE_SPOT[0],
+    "fac_lat": TRUE_FACULA_LAT,
+    "fac_long": TRUE_FACULA_LONG,
+    "fac_size": TRUE_FACULA_SIZE,
+    "fac_flux": FLUX_ACTIVE_FACULA[0],
+    "planet_radius": TRUE_PLANET_RADIUS,
+    "semimajor_axis": TRUE_SEMI_MAJOR,
+    "inclination": TRUE_INCLINATION,
+    "eccentricity": TRUE_ECCENTRICITY,
+    "arg_periapsis": TRUE_ARG_PERIAPSIS,
+    "P_orb": TRUE_P_ORB,
+    "LDC_u1": TRUE_LDC_U1,
+    "LDC_u2": TRUE_LDC_U2,
+}
+
+PARAM_NAMES = list(GROUND_TRUTH.keys())
 
 
-def plot_model(filename: str = "spot_light_curve.png"):
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+def plot_model(filename: str = "spot_transit_light_curve.png"):
     """
     Saves a diagnostic plot showing:
-      - The ground-truth and observed light curves
-      - A 2D marginal heatmap of log p(ar_lat, ar_long | y_obs) with ar_size fixed
-
-    Saved to OUTPUT_DIR / filename.
+      - The ground-truth combined light curve and noisy observations
+      - The transit component alone
+      - The activity component alone
+      - A 2D marginal heatmap of log p(spot_lat, spot_long | y_obs)
     """
     log_density_fn = make_log_density()
 
-    # --- Ground-truth vs observed light curve ---
-    lc_true = np.array(_call_sajax(TRUE_LAT, TRUE_LONG, TRUE_SIZE))
+    # Individual components
+    lc_activity = np.array(
+        _call_sajax(
+            TIMES,
+            jnp.array([TRUE_SPOT_LAT, TRUE_FACULA_LAT]),
+            jnp.array([TRUE_SPOT_LONG, TRUE_FACULA_LONG]),
+            jnp.array([TRUE_SPOT_SIZE, TRUE_FACULA_SIZE]),
+            np.stack([FLUX_ACTIVE_SPOT, FLUX_ACTIVE_FACULA]),
+            TRUE_P_ROT,
+            TRUE_LDC_U1,
+            TRUE_LDC_U2
+        )
+    )
+    lc_transit = np.array(
+        _call_jaxoplanet(
+            times=TIMES,
+            planet_radius=TRUE_PLANET_RADIUS,
+            semimajor_axis=TRUE_SEMI_MAJOR,
+            inclination=TRUE_INCLINATION,
+            eccentricity=TRUE_ECCENTRICITY,
+            arg_periapsis=TRUE_ARG_PERIAPSIS,
+            P_orb=TRUE_P_ORB,
+            LDC_u1=TRUE_LDC_U1,
+            LDC_u2=TRUE_LDC_U2,
+        )
+    )
+    lc_combined = lc_activity * lc_transit
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    ax = axes[0]
-    ax.plot(PHASES_ROT, lc_true, lw=2, label="True light curve", color="steelblue")
-    ax.scatter(PHASES_ROT, OBS_LIGHT_CURVE, s=10, alpha=0.7, color="orange", label="Observed (+ noise)")
-    ax.set_xlabel("Rotational phase [deg]")
+    # --- Combined light curve ---
+    ax = axes[0, 0]
+    ax.plot(TIMES, lc_combined, lw=1.5, label="True combined", color="steelblue")
+    ax.scatter(
+        TIMES, OBS_LIGHT_CURVE,
+        s=1, alpha=0.3, color="orange", label="Observed (+ noise)",
+    )
+    ax.set_xlabel("Time [days]")
     ax.set_ylabel("Normalised flux")
-    ax.set_title("Spot light curve")
+    ax.set_title("Combined: activity × transit")
     ax.legend()
 
-    # --- Log-posterior slice: lat vs long at true ar_size ---
-    resolution = 60
-    lats  = np.linspace(LAT_MIN,  LAT_MAX,  resolution)
+    # --- Activity only ---
+    ax = axes[0, 1]
+    ax.plot(TIMES, lc_activity, lw=1.5, color="green")
+    ax.set_xlabel("Time [days]")
+    ax.set_ylabel("Normalised flux")
+    ax.set_title("Stellar activity only (sajax)")
+
+    # --- Transit only ---
+    ax = axes[1, 0]
+    # Zoom into transit window
+    t_mid = TRUE_T0_TRANSIT
+    t_window = 3 * TRUE_T14_TRANSIT
+    mask = np.abs(TIMES - t_mid) < t_window
+    ax.plot(TIMES[mask], lc_transit[mask], lw=2, color="crimson")
+    ax.set_xlabel("Time [days]")
+    ax.set_ylabel("Normalised flux")
+    ax.set_title("Planet transit only (jaxoplanet)")
+
+    # --- Log-posterior slice: spot_lat vs spot_long ---
+    resolution = 40
+    lats = np.linspace(LAT_MIN, LAT_MAX, resolution)
     longs = np.linspace(LONG_MIN, LONG_MAX, resolution)
     LL, LO = np.meshgrid(lats, longs)
-    grid = np.stack([LL.ravel(), LO.ravel(), np.full(LL.size, TRUE_SIZE)], axis=-1)
 
-    log_p = np.array([log_density_fn(jnp.array(row)) for row in grid])
-    log_p = log_p.reshape(resolution, resolution)
+    # Fix all other params to ground truth
+    log_p = np.zeros((resolution, resolution))
+    for i in range(resolution):
+        for j in range(resolution):
+            x = jnp.array([
+                LL[i, j], LO[i, j], TRUE_SPOT_SIZE, FLUX_ACTIVE_SPOT[0],
+                TRUE_FACULA_LAT, TRUE_FACULA_LONG, TRUE_FACULA_SIZE,
+                FLUX_ACTIVE_FACULA[0],
+            ])
+            log_p[i, j] = log_density_fn(x)
 
-    ax = axes[1]
+    ax = axes[1, 1]
     im = ax.pcolormesh(lats, longs, log_p, shading="auto", cmap="viridis")
-    ax.scatter([TRUE_LAT], [TRUE_LONG], color="red", s=60, zorder=5, label="True params")
-    ax.set_xlabel("ar_lat [deg]")
-    ax.set_ylabel("ar_long [deg]")
-    ax.set_title(f"log p(lat, long | data)  [ar_size = {TRUE_SIZE}°]")
+    ax.scatter(
+        [TRUE_SPOT_LAT], [TRUE_SPOT_LONG],
+        color="red", s=60, zorder=5, label="True spot",
+    )
+    ax.set_xlabel("spot_lat [deg]")
+    ax.set_ylabel("spot_long [deg]")
+    ax.set_title("log p(lat, long | data) [other params fixed]")
     ax.legend()
     plt.colorbar(im, ax=ax, label="log p")
 
@@ -223,3 +555,69 @@ def plot_model(filename: str = "spot_light_curve.png"):
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved plot to {out_path}")
+
+
+def main():
+
+    # Individual components
+    lc_activity = np.array(
+        _call_sajax(
+            TIMES,
+            jnp.array([TRUE_SPOT_LAT, TRUE_FACULA_LAT]),
+            jnp.array([TRUE_SPOT_LONG, TRUE_FACULA_LONG]),
+            jnp.array([TRUE_SPOT_SIZE, TRUE_FACULA_SIZE]),
+            np.stack([FLUX_ACTIVE_SPOT, FLUX_ACTIVE_FACULA]),
+            TRUE_P_ROT,
+            TRUE_LDC_U1,
+            TRUE_LDC_U2
+        )
+    )
+    lc_transit = np.array(
+        _call_jaxoplanet(
+            times=TIMES,
+            planet_radius=TRUE_PLANET_RADIUS,
+            semimajor_axis=TRUE_SEMI_MAJOR,
+            inclination=TRUE_INCLINATION,
+            eccentricity=TRUE_ECCENTRICITY,
+            arg_periapsis=TRUE_ARG_PERIAPSIS,
+            P_orb=TRUE_P_ORB,
+            LDC_u1=TRUE_LDC_U1,
+            LDC_u2=TRUE_LDC_U2,
+        )
+    )
+    #Combination
+    lc_combined = lc_activity * lc_transit
+    obs = generate_observations(seed=12)
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+    # Combined
+    ax = axes[0]
+    ax.plot(TIMES, lc_combined, ".-", label="True combined", color="steelblue")
+    ax.plot(TIMES, obs, ".", alpha=0.7, color="orange", label="Observed")
+    ax.set_ylabel("Normalised flux")
+    ax.set_title("Combined light curve: stellar activity x planet transit")
+    ax.legend()
+
+    ax = axes[1]
+    ax.plot(TIMES, lc_activity, ".-", color="green", label="Stellar activity (sajax)")
+    ax.set_ylabel("Normalised flux")
+    ax.set_title("Stellar activity modulation")
+    ax.legend()
+
+    # Transit only
+    ax = axes[2]
+    ax.plot(TIMES, lc_transit, ".-", color="crimson", label="Planet transit (jaxoplanet)")
+    ax.set_xlabel("Time [days]")
+    ax.set_ylabel("Normalised flux")
+    ax.set_title("Planet transit")
+    ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # plot_model()
+
+
+if __name__ == "__main__":
+    main()

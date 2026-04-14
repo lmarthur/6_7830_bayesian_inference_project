@@ -17,6 +17,8 @@ dependencies = [
     "tensorflow",
     "emcee_jax @ git+https://github.com/SamMerc/emcee-jax.git",
     "sajax",
+    "jaxoplanet",
+    "astropy",
     "pt_jax @ git+https://github.com/lmarthur/pt-jax.git"
 ]
 
