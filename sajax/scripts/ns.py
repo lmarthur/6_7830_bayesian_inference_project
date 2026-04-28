@@ -77,10 +77,7 @@ def main(seed=0, save_outputs=True):
             samples.append(val)
         return jnp.stack(samples)
 
-    def log_likelihood(x):
-        return log_density_fn(x)
-
-    model = jaxns.Model(prior_model=prior_model, log_likelihood=log_likelihood)
+    model = jaxns.Model(prior_model=prior_model, log_likelihood=log_density_fn)
     if save_outputs:
         model.sanity_check(jax.random.PRNGKey(1), S=100)
 

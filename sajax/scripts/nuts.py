@@ -51,7 +51,6 @@ def get_initial_positions(key: jax.Array, num_chains: int) -> jnp.ndarray:
 
 
 def inference_loop(rng_key, kernel, initial_state, num_samples):
-    @jax.jit
     def one_step(state, rng_key):
         state, info = kernel(rng_key, state)
         return state, (state, info)
