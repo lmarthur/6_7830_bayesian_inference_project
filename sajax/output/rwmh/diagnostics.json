@@ -7,7 +7,7 @@
   "step_size": 0.5772347875864724,
   "mean_acceptance_rate": 8.437500218860805e-05,
   "total_log_density_evals": 400000,
-  "wall_time_s": 210.25455694273114,
+  "wall_time_s": 212.0825102800154,
   "total_bulk_ess": 378.0,
   "bulk_ess_per_logp_eval": 0.000945,
   "posterior_means": {
