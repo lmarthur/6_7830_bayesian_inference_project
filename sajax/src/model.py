@@ -13,8 +13,8 @@ where lc_activity comes from sajax (rotational modulation from spots/faculae)
 and lc_transit comes from jaxoplanet (limb-darkened transit model).
 
 A NumPyro model is used to define the joint distribution over the spot
-parameters and the observed data, and numpyro.infer.util.log_density is
-used to extract a BlackJAX-compatible log-density function for sampling.
+parameters and the observed data, and numpyro.infer.util.initialize_model is
+used to extract BlackJAX-compatible inference functions in unconstrained space.
 """
 
 from pathlib import Path
@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from numpyro.infer.util import log_density
+from numpyro.infer.util import initialize_model
 import astropy.units as u
 from astropy.constants import G
 
@@ -374,49 +374,67 @@ def sajax_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE), model_dict: dic
     numpyro.sample("y_obs", dist.Normal(lc, SIGMA_NOISE), obs=y_obs)
 
 
-def make_log_density(y_obs: np.ndarray = OBS_LIGHT_CURVE, model_dict: dict = STATIC_MODEL):
+def make_inference_fns(rng_key, y_obs: np.ndarray = OBS_LIGHT_CURVE, model_dict: dict = STATIC_MODEL):
     """
-    Returns a BlackJAX-compatible log-density function.
+    Returns (log_density_fn, postprocess_fn, init_z) for use with BlackJAX/emcee_jax.
 
-    The returned function accepts a 17-element parameter vector:
-        x = [spot_lat, spot_long, spot_size, spot_flux,
-             fac_lat, fac_long, fac_size, fac_flux,
-             p_rot,
-             planet_radius, semimajor_axis, inclination (degrees),
-             ecc_h, ecc_k, P_orb,
-             ldc_q1, ldc_q2]
+    All three operate in the unconstrained space that samplers work in:
+      - log_density_fn : dict of unconstrained params → scalar log density
+      - postprocess_fn : dict of unconstrained params → dict of constrained physical
+                         values, including deterministic sites
+      - init_z         : initial unconstrained position dict, sampled from the prior
     """
-    y_obs_jnp = jnp.array(y_obs)
+    param_info, potential_fn, postprocess_fn, _ = initialize_model(
+        rng_key,
+        sajax_model,
+        model_args=(),
+        model_kwargs={"y_obs": jnp.array(y_obs), "model_dict": model_dict},
+    )
+    return lambda x: -potential_fn(x), postprocess_fn, param_info.z
 
-    def log_density_fn(x):
-        params = {
-            "spot_lat": x[0],
-            "spot_long": x[1],
-            "spot_size": x[2],
-            "spot_flux": x[3],
-            "fac_lat": x[4],
-            "fac_long": x[5],
-            "fac_size": x[6],
-            "fac_flux": x[7],
-            "p_rot": x[8],
-            "planet_radius": x[9],
-            "semimajor_axis": x[10],
-            "inclination": x[11],
-            "ecc_h": x[12],
-            "ecc_k": x[13],
-            "P_orb": x[14],
-            "ldc_q1": x[15],
-            "ldc_q2": x[16],
-        }
-        ld, _ = log_density(
-            sajax_model,
-            model_args=(),
-            model_kwargs={"y_obs": y_obs_jnp, "model_dict": model_dict},
-            params=params,
-        )
-        return ld
 
-    return log_density_fn
+def make_constrain_fn():
+    """
+    Returns a lightweight unconstrained → constrained mapping.
+
+    Unlike postprocess_fn from initialize_model, this never calls the forward
+    model.  It only applies the analytical bijection for each prior distribution
+    and computes the deterministic sites analytically.
+
+    Safe to jax.vmap over arbitrarily large sample arrays without the memory
+    blowup that occurs when postprocess_fn (which runs _compute_all_phases) is
+    vmapped over thousands of MCMC samples.
+    """
+    from numpyro.distributions import biject_to
+    transforms = {name: biject_to(d.support) for name, d in PRIOR_DISTRIBUTIONS.items()}
+
+    def constrain_fn(z):
+        c = {name: transforms[name](z[name]) for name in transforms}
+        c["eccentricity"]  = c["ecc_h"]**2 + c["ecc_k"]**2
+        c["arg_periapsis"] = jnp.arctan2(c["ecc_k"], c["ecc_h"])
+        c["ldc_u1"] = 2 * jnp.sqrt(c["ldc_q1"]) * c["ldc_q2"]
+        c["ldc_u2"] = jnp.sqrt(c["ldc_q1"]) * (1 - 2 * c["ldc_q2"])
+        return c
+
+    return constrain_fn
+
+
+def make_log_ref(rng_key):
+    """
+    Returns the log density of the prior in unconstrained space.
+
+    Used as the DEO/SEO reference distribution.  Both log_density_fn (from
+    make_inference_fns) and this function include the same log-Jacobian
+    correction, so likelihood-tempering interpolates consistently.
+    """
+    def _prior_only():
+        for name, d in PRIOR_DISTRIBUTIONS.items():
+            numpyro.sample(name, d)
+
+    _, prior_potential_fn, _, _ = initialize_model(
+        rng_key, _prior_only, model_args=(), model_kwargs={}
+    )
+    return lambda x: -prior_potential_fn(x)
 
 
 # ---------------------------------------------------------------------------

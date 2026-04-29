@@ -15,13 +15,15 @@ with warnings.catch_warnings():
     import arviz as az
 import emcee_jax
 import jax
+import jax.flatten_util
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Import our specific model components
 from model import (
-    make_log_density,
+    make_inference_fns,
+    make_constrain_fn,
     plot_model,
     _call_sajax,
     OUTPUT_DIR,
@@ -30,6 +32,8 @@ from model import (
     TIMES,
     OBS_LIGHT_CURVE,
     PRIOR_DISTRIBUTIONS,
+    TRUE_LDC_U1,
+    TRUE_LDC_U2,
 )
 
 AFFINV_OUTPUT_DIR = OUTPUT_DIR / "affinv"
@@ -39,31 +43,53 @@ NUM_SAMPLES = 2000
 NUM_WALKERS = 64
 NDIM = len(PARAM_NAMES)
 
-def get_initial_coords(key, num_walkers):
-    """Sample each walker's starting position independently from the prior."""
-    coords = []
-    for name in PARAM_NAMES:
-        key, subkey = jax.random.split(key)
-        samples = PRIOR_DISTRIBUTIONS[name].sample(subkey, sample_shape=(num_walkers,))
-        coords.append(samples)
-    return jnp.stack(coords, axis=-1)
+
+def get_initial_coords(key, num_walkers, unravel_fn):
+    """Sample each walker's starting position from the prior in unconstrained space."""
+    from numpyro.distributions import biject_to
+    inv_transforms = {name: biject_to(d.support).inv for name, d in PRIOR_DISTRIBUTIONS.items()}
+
+    walker_keys = jax.random.split(key, num_walkers)
+    flat_positions = []
+    for wk in walker_keys:
+        param_keys = jax.random.split(wk, len(PRIOR_DISTRIBUTIONS))
+        z_dict = {
+            name: inv_transforms[name](d.sample(pk))
+            for pk, (name, d) in zip(param_keys, PRIOR_DISTRIBUTIONS.items())
+        }
+        flat_z, _ = jax.flatten_util.ravel_pytree(z_dict)
+        flat_positions.append(flat_z)
+    return jnp.stack(flat_positions)
+
 
 def main(seed=0, save_outputs=True):
     init_key, state_key, sample_key = jax.random.split(jax.random.PRNGKey(seed), 3)
     _print = print if save_outputs else lambda *a, **kw: None
 
     # --- Model ---
-    log_density_fn = make_log_density()
+    log_density_fn, _, init_z = make_inference_fns(init_key)
+    constrain_fn = make_constrain_fn()
+    _, unravel_fn = jax.flatten_util.ravel_pytree(init_z)
+    log_density_flat = lambda x: log_density_fn(unravel_fn(x))
+
     if save_outputs:
         plot_model(filename="sajax_ground_truth.png")
 
     t0 = time.perf_counter()
 
     # --- Initialize walkers ---
-    coords = get_initial_coords(init_key, NUM_WALKERS)
+    coords = get_initial_coords(init_key, NUM_WALKERS, unravel_fn)
+
+    n_show = min(8, NUM_WALKERS)
+    coords_constrained = jax.vmap(lambda x: constrain_fn(unravel_fn(x)))(coords[:n_show])
+    _print(f"\nInitial walker positions (constrained space, first {n_show} of {NUM_WALKERS}):")
+    _print(f"  {'param':20s}  " + "  ".join(f"walker{i:02d}" for i in range(n_show)))
+    for name in PARAM_NAMES:
+        vals = np.array(coords_constrained[name])
+        _print(f"  {name:20s}  " + "  ".join(f"{v:8.4f}" for v in vals))
 
     # --- Initialize sampler ---
-    sampler = emcee_jax.EnsembleSampler(log_density_fn)
+    sampler = emcee_jax.EnsembleSampler(log_density_flat)
     state = sampler.init(state_key, coords)
 
     # --- Run chains ---
@@ -72,21 +98,30 @@ def main(seed=0, save_outputs=True):
 
     # Reshape: (NUM_STEPS, NUM_WALKERS, NDIM) -> (NUM_WALKERS, NUM_SAMPLES, NDIM)
     raw = np.asarray(trace.samples.coordinates)
-    samples = raw.transpose(1, 0, 2)
-    samples = samples[:, NUM_BURNIN:, :] 
+    samples_unc = raw.transpose(1, 0, 2)
+    samples_unc = samples_unc[:, NUM_BURNIN:, :]
+
+    # Convert unconstrained samples to constrained space
+    flat_unc = samples_unc.reshape(-1, samples_unc.shape[-1])
+    constrained = jax.vmap(lambda x: constrain_fn(unravel_fn(x)))(flat_unc)
+    # Split walkers into 2 equal groups to satisfy ArviZ's minimum-2-chains
+    # requirement for R-hat. Walkers within each half are combined into draws.
+    n_post = samples_unc.shape[1]
+    half = NUM_WALKERS // 2
+    cold_samples = {name: np.array(constrained[name]).reshape(2, half * n_post)
+                    for name in PARAM_NAMES}
 
     # --- Diagnostics ---
     accepted = np.asarray(trace.sample_stats['accept_prob'])
     acceptance = float(accepted.mean())
     total_log_density_evals = NUM_WALKERS * NUM_SAMPLES
 
-    # ArviZ setup for all 17 parameters
-    posterior_dict = {PARAM_NAMES[i]: samples[:, :, i] for i in range(NDIM)}
+    posterior_dict = {name: cold_samples[name] for name in PARAM_NAMES}
     idata = az.from_dict(
         posterior=posterior_dict,
-        sample_stats={"acceptance_rate": accepted[NUM_BURNIN:, :].T},
+        sample_stats={"acceptance_rate": accepted[NUM_BURNIN:, :].T.reshape(2, half * n_post)},
     )
-    
+
     summary = az.summary(idata)
     total_bulk_ess = summary["ess_bulk"].mean()
     ess_per_logp_eval = total_bulk_ess / total_log_density_evals
@@ -94,8 +129,8 @@ def main(seed=0, save_outputs=True):
     _print("\n=== Diagnostics ===")
     _print(f"  Mean acceptance rate:          {acceptance:.3f}")
     _print(f"  Total log-density evaluations: {int(total_log_density_evals)}")
-    _print("\n  ArviZ summary (first 5 params):")
-    _print(summary.head().to_string())
+    _print("\n  ArviZ summary (R-hat, ESS, MCSE):")
+    _print(summary.to_string())
     _print(f"\n  Average Bulk ESS per log-density eval: {ess_per_logp_eval:.4f}")
 
     wall_time_s = time.perf_counter() - t0
@@ -105,18 +140,13 @@ def main(seed=0, save_outputs=True):
     if save_outputs:
         AFFINV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         idata.to_netcdf(str(AFFINV_OUTPUT_DIR / "sajax_idata.nc"))
-        
-        # Summary plots
-        # 1. Trace Plots (subset for readability) — skip any param with zero variance
-        plot_vars = [
-            p for p in PARAM_NAMES[:6]
-            if np.ptp(samples[:, :, PARAM_NAMES.index(p)]) > 1e-8
-        ]
-        if plot_vars:
-            axes = az.plot_trace(idata, var_names=plot_vars)
-            plt.tight_layout()
-            plt.savefig(AFFINV_OUTPUT_DIR / "traces_subset.png")
-            plt.close()
+
+        # 1. Trace Plots (subset for readability)
+        plot_vars = PARAM_NAMES[:6]
+        az.plot_trace(idata, var_names=plot_vars)
+        plt.tight_layout()
+        plt.savefig(AFFINV_OUTPUT_DIR / "traces_subset.png")
+        plt.close()
 
         # 2. Corner plot — all parameters
         az.rcParams["plot.max_subplots"] = len(PARAM_NAMES) ** 2
@@ -131,36 +161,31 @@ def main(seed=0, save_outputs=True):
         plt.close()
 
         # 3. Best-fit light curve using posterior mean
-        mean_params = samples.mean(axis=(0, 1))
-        mean_dict = {name: float(mean_params[i]) for i, name in enumerate(PARAM_NAMES)}
-        mean_ecc = mean_dict["ecc_h"]**2 + mean_dict["ecc_k"]**2
-        mean_omega = float(np.arctan2(mean_dict["ecc_k"], mean_dict["ecc_h"]))
-        mean_u1 = 2 * np.sqrt(mean_dict["ldc_q1"]) * mean_dict["ldc_q2"]
-        mean_u2 = np.sqrt(mean_dict["ldc_q1"]) * (1 - 2 * mean_dict["ldc_q2"])
+        mean_c = {name: float(np.array(v).mean()) for name, v in cold_samples.items()}
+        mean_eccentricity = mean_c["ecc_h"]**2 + mean_c["ecc_k"]**2
+        mean_arg_periapsis = float(np.arctan2(mean_c["ecc_k"], mean_c["ecc_h"]))
+        mean_u1 = 2 * np.sqrt(mean_c["ldc_q1"]) * mean_c["ldc_q2"]
+        mean_u2 = np.sqrt(mean_c["ldc_q1"]) * (1 - 2 * mean_c["ldc_q2"])
 
         lc_bestfit = np.array(
             _call_sajax(
                 TIMES,
-                np.array([mean_dict["spot_lat"], mean_dict["fac_lat"]]),
-                np.array([mean_dict["spot_long"], mean_dict["fac_long"]]),
-                np.array([mean_dict["spot_size"], mean_dict["fac_size"]]),
-                np.stack([np.array([mean_dict["spot_flux"]]), np.array([mean_dict["fac_flux"]])]),
-                mean_dict["p_rot"],
-                mean_dict["planet_radius"],
-                mean_dict["semimajor_axis"],
-                np.deg2rad(mean_dict["inclination"]),
-                mean_ecc,
-                mean_omega,
-                mean_dict["P_orb"],
+                np.array([mean_c["spot_lat"], mean_c["fac_lat"]]),
+                np.array([mean_c["spot_long"], mean_c["fac_long"]]),
+                np.array([mean_c["spot_size"], mean_c["fac_size"]]),
+                np.stack([np.array([mean_c["spot_flux"]]), np.array([mean_c["fac_flux"]])]),
+                mean_c["p_rot"],
+                mean_c["planet_radius"],
+                mean_c["semimajor_axis"],
+                np.deg2rad(mean_c["inclination"]),
+                mean_eccentricity,
+                mean_arg_periapsis,
+                mean_c["P_orb"],
                 mean_u1,
                 mean_u2,
             )["lc"]
         )
 
-        gt_ecc = GROUND_TRUTH["ecc_h"]**2 + GROUND_TRUTH["ecc_k"]**2
-        gt_omega = float(np.arctan2(GROUND_TRUTH["ecc_k"], GROUND_TRUTH["ecc_h"]))
-        gt_u1 = 2 * np.sqrt(GROUND_TRUTH["ldc_q1"]) * GROUND_TRUTH["ldc_q2"]
-        gt_u2 = np.sqrt(GROUND_TRUTH["ldc_q1"]) * (1 - 2 * GROUND_TRUTH["ldc_q2"])
         lc_true = np.array(
             _call_sajax(
                 TIMES,
@@ -172,11 +197,11 @@ def main(seed=0, save_outputs=True):
                 GROUND_TRUTH["planet_radius"],
                 GROUND_TRUTH["semimajor_axis"],
                 np.deg2rad(GROUND_TRUTH["inclination"]),
-                gt_ecc,
-                gt_omega,
+                GROUND_TRUTH["ecc_h"]**2 + GROUND_TRUTH["ecc_k"]**2,
+                float(np.arctan2(GROUND_TRUTH["ecc_k"], GROUND_TRUTH["ecc_h"])),
                 GROUND_TRUTH["P_orb"],
-                gt_u1,
-                gt_u2,
+                TRUE_LDC_U1,
+                TRUE_LDC_U2,
             )["lc"]
         )
 
@@ -207,6 +232,7 @@ def main(seed=0, save_outputs=True):
         plt.close(fig)
 
     return summary
+
 
 if __name__ == "__main__":
     main()
