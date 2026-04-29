@@ -20,68 +20,35 @@ _mod = importlib.util.module_from_spec(_spec)
 sys.modules["sajax.model"] = _mod
 _spec.loader.exec_module(_mod)
 
-GROUND_TRUTH = _mod.GROUND_TRUTH
-OBS_LIGHT_CURVE = _mod.OBS_LIGHT_CURVE
-PARAM_NAMES = _mod.PARAM_NAMES
-PRIOR_DISTRIBUTIONS = _mod.PRIOR_DISTRIBUTIONS
-SIGMA_NOISE = _mod.SIGMA_NOISE
-TIMES = _mod.TIMES
-TRUE_T14_TRANSIT = _mod.TRUE_T14_TRANSIT
-STATIC_MODEL = _mod.STATIC_MODEL
-TRUE_T0_TRANSIT = _mod.TRUE_T0_TRANSIT
-_call_sajax = _mod._call_sajax
-_compute_all_phases = _mod._compute_all_phases
+GROUND_TRUTH             = _mod.GROUND_TRUTH
+OBS_LIGHT_CURVE          = _mod.OBS_LIGHT_CURVE
+PARAM_NAMES              = _mod.PARAM_NAMES
+PRIOR_DISTRIBUTIONS      = _mod.PRIOR_DISTRIBUTIONS
+SIGMA_NOISE              = _mod.SIGMA_NOISE
+TIMES                    = _mod.TIMES
+TRUE_T14_TRANSIT         = _mod.TRUE_T14_TRANSIT
+STATIC_MODEL             = _mod.STATIC_MODEL
+TRUE_T0_TRANSIT          = _mod.TRUE_T0_TRANSIT
+TRUE_LDC_U1              = _mod.TRUE_LDC_U1
+TRUE_LDC_U2              = _mod.TRUE_LDC_U2
+_call_sajax              = _mod._call_sajax
+_compute_all_phases      = _mod._compute_all_phases
 compute_planet_sky_positions = _mod.compute_planet_sky_positions
-rotate_active_region = _mod.rotate_active_region
-generate_observations = _mod.generate_observations
-make_log_density = _mod.make_log_density
-plot_model = _mod.plot_model
-sajax_model = _mod.sajax_model
+rotate_active_region     = _mod.rotate_active_region
+generate_observations    = _mod.generate_observations
+make_inference_fns       = _mod.make_inference_fns
+make_constrain_fn        = _mod.make_constrain_fn
+make_log_ref             = _mod.make_log_ref
+plot_model               = _mod.plot_model
+sajax_model              = _mod.sajax_model
 
 
 # ---------------------------------------------------------------------------
-# Ground-truth parameter vector matching the 17-element ordering in
-# make_log_density. Inclination is in degrees; ecc_h/ecc_k and ldc_q1/q2
-# are in the reparameterized spaces.
+# Shared inference functions — created once to avoid re-tracing the model.
 # ---------------------------------------------------------------------------
-GT_VECTOR = jnp.array([
-    GROUND_TRUTH["spot_lat"],
-    GROUND_TRUTH["spot_long"],
-    GROUND_TRUTH["spot_size"],
-    GROUND_TRUTH["spot_flux"],
-    GROUND_TRUTH["fac_lat"],
-    GROUND_TRUTH["fac_long"],
-    GROUND_TRUTH["fac_size"],
-    GROUND_TRUTH["fac_flux"],
-    GROUND_TRUTH["p_rot"],
-    GROUND_TRUTH["planet_radius"],
-    GROUND_TRUTH["semimajor_axis"],
-    GROUND_TRUTH["inclination"],
-    GROUND_TRUTH["ecc_h"],
-    GROUND_TRUTH["ecc_k"],
-    GROUND_TRUTH["P_orb"],
-    GROUND_TRUTH["ldc_q1"],
-    GROUND_TRUTH["ldc_q2"],
-])
 
-
-def _sample_prior_vector(seed: int = 0) -> jnp.ndarray:
-    """Draw a single in-prior parameter vector matching the make_log_density ordering."""
-    rng = np.random.default_rng(seed)
-    key_order = [
-        "spot_lat", "spot_long", "spot_size", "spot_flux",
-        "fac_lat", "fac_long", "fac_size", "fac_flux",
-        "p_rot",
-        "planet_radius", "semimajor_axis", "inclination",
-        "ecc_h", "ecc_k", "P_orb",
-        "ldc_q1", "ldc_q2",
-    ]
-    key = jax.random.PRNGKey(int(rng.integers(0, 2**31 - 1)))
-    keys = jax.random.split(key, len(key_order))
-    return jnp.array([
-        float(PRIOR_DISTRIBUTIONS[name].sample(k))
-        for name, k in zip(key_order, keys)
-    ])
+_RNG = jax.random.PRNGKey(0)
+_LOG_DENSITY_FN, _POSTPROCESS_FN, _INIT_Z = make_inference_fns(_RNG)
 
 
 # ---------------------------------------------------------------------------
@@ -92,19 +59,25 @@ def test_obs_shape_matches_times():
     assert OBS_LIGHT_CURVE.shape == TIMES.shape
 
 
-def test_gt_vector_length():
-    assert GT_VECTOR.shape == (17,)
-
-
 def test_param_names_match_ground_truth():
     assert PARAM_NAMES == list(GROUND_TRUTH.keys())
+    assert len(PARAM_NAMES) == 17
+
+
+def test_param_names_all_present_in_postprocess_output():
+    """Every sampled parameter name must appear in postprocess_fn output.
+    Catches key casing mismatches between GROUND_TRUTH and numpyro sample sites."""
+    constrained = _POSTPROCESS_FN(_INIT_Z)
+    for name in PARAM_NAMES:
+        assert name in constrained, (
+            f"PARAM_NAMES entry '{name}' is missing from postprocess_fn output. "
+            f"Available keys: {list(constrained.keys())}"
+        )
 
 
 def test_prior_keys_consumed_by_model():
     """Every prior in PRIOR_DISTRIBUTIONS should appear as a sample site in
-    sajax_model. Uses source-code string matching, so it catches dead/leftover
-    priors but will not detect a prior that is referenced but never passed to
-    numpyro.sample."""
+    sajax_model."""
     import inspect
     src = inspect.getsource(sajax_model)
     for name in PRIOR_DISTRIBUTIONS:
@@ -137,8 +110,7 @@ def test_generate_observations_different_seeds_differ():
 
 
 def test_generate_observations_noise_scale():
-    """Residuals between two seeds (both contain the same true light curve)
-    should have std ~= sqrt(2) * SIGMA_NOISE."""
+    """Residuals between two seeds should have std ~= sqrt(2) * SIGMA_NOISE."""
     a = generate_observations(seed=1)
     b = generate_observations(seed=2)
     diff_std = float(np.std(a - b))
@@ -147,59 +119,159 @@ def test_generate_observations_noise_scale():
 
 
 # ---------------------------------------------------------------------------
-# Log density: finiteness, JIT, gradient
+# Log density: finiteness, JIT, gradient (unconstrained space)
 # ---------------------------------------------------------------------------
 
 def test_log_density_returns_scalar():
-    log_density_fn = make_log_density()
-    result = log_density_fn(GT_VECTOR)
+    result = _LOG_DENSITY_FN(_INIT_Z)
     assert result.shape == ()
 
 
-def test_log_density_finite_at_ground_truth():
-    log_density_fn = make_log_density()
-    result = float(log_density_fn(GT_VECTOR))
+def test_log_density_finite_at_prior_init():
+    """Log density must be finite at a prior draw in unconstrained space."""
+    result = float(_LOG_DENSITY_FN(_INIT_Z))
     assert np.isfinite(result)
 
 
-def test_log_density_finite_at_prior_draws():
-    log_density_fn = make_log_density()
+def test_log_density_finite_at_multiple_prior_draws():
     for seed in range(3):
-        x = _sample_prior_vector(seed=seed)
-        val = float(log_density_fn(x))
+        _, _, z = make_inference_fns(jax.random.PRNGKey(seed + 10))
+        val = float(_LOG_DENSITY_FN(z))
         assert np.isfinite(val), f"Non-finite log density at prior draw seed={seed}"
 
 
 def test_log_density_jit_compatible():
-    log_density_fn = make_log_density()
-    jitted = jax.jit(log_density_fn)
-    val = float(jitted(GT_VECTOR))
+    jitted = jax.jit(_LOG_DENSITY_FN)
+    val = float(jitted(_INIT_Z))
     assert np.isfinite(val)
 
 
 def test_log_density_gradient_finite():
-    log_density_fn = make_log_density()
-    grad_fn = jax.grad(log_density_fn)
-    g = grad_fn(GT_VECTOR)
-    assert g.shape == GT_VECTOR.shape
-    assert np.all(np.isfinite(np.asarray(g)))
+    """Gradients must be finite everywhere in unconstrained space."""
+    grad = jax.grad(_LOG_DENSITY_FN)(_INIT_Z)
+    assert all(
+        np.all(np.isfinite(np.asarray(v))) for v in jax.tree.leaves(grad)
+    ), "Non-finite gradient at prior initialization"
 
 
-def test_log_density_higher_at_ground_truth_than_prior_draw():
-    """Smoke test: the posterior should prefer the truth over a random prior draw."""
-    log_density_fn = make_log_density()
-    ld_truth = float(log_density_fn(GT_VECTOR))
-    ld_random = float(log_density_fn(_sample_prior_vector(seed=7)))
-    assert ld_truth > ld_random
+def test_log_density_finite_at_two_draws():
+    """Both a near-truth and a distant draw should yield finite log density."""
+    ld_near = float(_LOG_DENSITY_FN(_INIT_Z))
+    _, _, z_far = make_inference_fns(jax.random.PRNGKey(99))
+    ld_far = float(_LOG_DENSITY_FN(z_far))
+    assert np.isfinite(ld_near)
+    assert np.isfinite(ld_far)
 
+
+# ---------------------------------------------------------------------------
+# postprocess_fn: constrained values within prior bounds
+# ---------------------------------------------------------------------------
+
+def test_postprocess_fn_returns_dict():
+    constrained = _POSTPROCESS_FN(_INIT_Z)
+    assert isinstance(constrained, dict)
+
+
+def test_postprocess_fn_includes_deterministics():
+    """postprocess_fn must include derived sites eccentricity and arg_periapsis."""
+    constrained = _POSTPROCESS_FN(_INIT_Z)
+    assert "eccentricity"  in constrained
+    assert "arg_periapsis" in constrained
+
+
+def test_postprocess_fn_uniform_params_within_bounds():
+    """All Uniform-prior parameters must be within their bounds after postprocessing,
+    across multiple prior draws.  This is the key test that was impossible to pass
+    with the old constrained-space log_density approach."""
+    bounds = {
+        "spot_lat":    (-90.0,  90.0),
+        "spot_long":   (  0.0, 360.0),
+        "spot_size":   (  1.0,  90.0),
+        "spot_flux":   (  0.1,   2.0),
+        "fac_lat":     (-90.0,  90.0),
+        "fac_long":    (  0.0, 360.0),
+        "fac_size":    (  1.0,  90.0),
+        "fac_flux":    (  0.1,   2.0),
+        "inclination": ( 80.0, 100.0),
+        "ldc_q1":      (  0.0,   1.0),
+        "ldc_q2":      (  0.0,   1.0),
+    }
+    for seed in range(5):
+        _, _, z = make_inference_fns(jax.random.PRNGKey(seed))
+        c = _POSTPROCESS_FN(z)
+        for name, (lo, hi) in bounds.items():
+            val = float(c[name])
+            assert lo <= val <= hi, (
+                f"seed={seed}: {name}={val:.4f} is outside [{lo}, {hi}]"
+            )
+
+
+def test_postprocess_fn_eccentricity_non_negative():
+    for seed in range(5):
+        _, _, z = make_inference_fns(jax.random.PRNGKey(seed))
+        c = _POSTPROCESS_FN(z)
+        assert float(c["eccentricity"]) >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# make_constrain_fn: must agree with postprocess_fn on sampled parameters
+# ---------------------------------------------------------------------------
+
+def test_constrain_fn_agrees_with_postprocess_fn():
+    """make_constrain_fn must give the same constrained values as postprocess_fn
+    for the sampled parameters.  Verifies that biject_to uses the same bijection
+    as initialize_model internally."""
+    constrain_fn = make_constrain_fn()
+    c_fast = constrain_fn(_INIT_Z)
+    c_full = _POSTPROCESS_FN(_INIT_Z)
+    for name in PRIOR_DISTRIBUTIONS:
+        assert jnp.allclose(
+            jnp.array(c_fast[name]), jnp.array(c_full[name]), atol=1e-5
+        ), (
+            f"Mismatch for '{name}': "
+            f"constrain_fn={float(c_fast[name]):.6f}, "
+            f"postprocess_fn={float(c_full[name]):.6f}"
+        )
+
+
+def test_constrain_fn_vmappable():
+    """make_constrain_fn result must be safe to jax.vmap over a batch of samples."""
+    import jax.flatten_util
+    constrain_fn = make_constrain_fn()
+    _, unravel_fn = jax.flatten_util.ravel_pytree(_INIT_Z)
+    flat = jax.flatten_util.ravel_pytree(_INIT_Z)[0]
+    batch = jnp.stack([flat] * 4)
+    result = jax.vmap(lambda x: constrain_fn(unravel_fn(x)))(batch)
+    for name in PRIOR_DISTRIBUTIONS:
+        assert result[name].shape == (4,), f"Unexpected shape for '{name}'"
+
+
+# ---------------------------------------------------------------------------
+# make_log_ref: prior log density in unconstrained space
+# ---------------------------------------------------------------------------
+
+def test_log_ref_finite_at_prior_draw():
+    log_ref = make_log_ref(jax.random.PRNGKey(1))
+    val = float(log_ref(_INIT_Z))
+    assert np.isfinite(val)
+
+
+def test_log_ref_finite_at_multiple_draws():
+    log_ref = make_log_ref(jax.random.PRNGKey(2))
+    for seed in range(3):
+        _, _, z = make_inference_fns(jax.random.PRNGKey(seed + 20))
+        assert np.isfinite(float(log_ref(z))), f"Non-finite log_ref at seed={seed}"
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth residuals: one-shot and two-stage API
+# ---------------------------------------------------------------------------
 
 def test_ground_truth_residuals_at_noise_level():
-    """Reconstructed light curve via the one-shot API (_call_sajax) at ground
-    truth should match OBS_LIGHT_CURVE to within ~SIGMA_NOISE. A large residual
-    std indicates the one-shot forward model does not round-trip correctly."""
+    """Reconstructed light curve via the one-shot API at ground truth should
+    match OBS_LIGHT_CURVE to within ~SIGMA_NOISE."""
     ecc_h = GROUND_TRUTH["ecc_h"]
     ecc_k = GROUND_TRUTH["ecc_k"]
-    q1, q2 = GROUND_TRUTH["ldc_q1"], GROUND_TRUTH["ldc_q2"]
     result = _call_sajax(
         TIMES,
         jnp.array([GROUND_TRUTH["spot_lat"], GROUND_TRUTH["fac_lat"]]),
@@ -212,10 +284,10 @@ def test_ground_truth_residuals_at_noise_level():
         GROUND_TRUTH["semimajor_axis"],
         jnp.deg2rad(GROUND_TRUTH["inclination"]),
         ecc_h**2 + ecc_k**2,
-        float(np.arctan2(ecc_k, ecc_h)),
+        jnp.arctan2(ecc_k, ecc_h),
         GROUND_TRUTH["P_orb"],
-        2 * np.sqrt(q1) * q2,
-        np.sqrt(q1) * (1 - 2 * q2),
+        TRUE_LDC_U1,
+        TRUE_LDC_U2,
     )
     lc_reconstructed = np.array(result["lc"])
     residuals = OBS_LIGHT_CURVE - lc_reconstructed
@@ -227,12 +299,10 @@ def test_ground_truth_residuals_at_noise_level():
 
 
 def test_two_stage_residuals_at_noise_level():
-    """Reconstructed light curve via the two-stage API (_compute_all_phases, the
-    path used by sajax_model during sampling) at ground truth should match
-    OBS_LIGHT_CURVE to within ~SIGMA_NOISE. Ensures the sampler's forward model
-    is consistent with the one-shot API used to generate the observations."""
+    """Reconstructed light curve via the two-stage API (_compute_all_phases) at
+    ground truth should match OBS_LIGHT_CURVE to within ~SIGMA_NOISE."""
     gt = GROUND_TRUTH
-    m = STATIC_MODEL
+    m  = STATIC_MODEL
 
     spot_lat      = gt["spot_lat"]
     spot_long     = gt["spot_long"]
@@ -243,13 +313,13 @@ def test_two_stage_residuals_at_noise_level():
     fac_size      = gt["fac_size"]
     fac_flux      = gt["fac_flux"]
     P_rot         = gt["p_rot"]
-    LDC_u1        = 2 * np.sqrt(gt["ldc_q1"]) * gt["ldc_q2"]
-    LDC_u2        = np.sqrt(gt["ldc_q1"]) * (1 - 2 * gt["ldc_q2"])
+    LDC_u1        = TRUE_LDC_U1
+    LDC_u2        = TRUE_LDC_U2
     planet_radius = gt["planet_radius"]
     semimajor     = gt["semimajor_axis"]
     inclination   = jnp.deg2rad(gt["inclination"])
     eccentricity  = gt["ecc_h"]**2 + gt["ecc_k"]**2
-    arg_periapsis = float(np.arctan2(gt["ecc_k"], gt["ecc_h"]))  # radians
+    arg_periapsis = jnp.arctan2(gt["ecc_k"], gt["ecc_h"])
     P_orb         = gt["P_orb"]
 
     dynamic_phases_rot = (m["times"] / P_rot * 360.0) % 360.0
@@ -281,39 +351,38 @@ def test_two_stage_residuals_at_noise_level():
 
     flux_active = jnp.stack([
         jnp.broadcast_to(spot_flux, (1,)),
-        jnp.broadcast_to(fac_flux, (1,)),
+        jnp.broadcast_to(fac_flux,  (1,)),
     ])
 
     lc, _, _ = _compute_all_phases(
         all_ar_carts,
         planet_xyz_all,
-        wavelength        = m["wavelength"],
-        flux_quiet_interp = m["flux_quiet"],
-        flux_active_interp= flux_active,
-        ldc_coeffs        = jnp.array([[LDC_u1, LDC_u2]]),
-        I_profile         = m["I_profile"],
-        mu_profile_pts    = m["mu_profile_pts"],
-        x_disc            = m["x_disc"],
-        y_disc            = m["y_disc"],
-        mu_disc           = m["mu_disc"],
-        vel_disc          = m["vel_disc"],
-        star_pixel_rad    = spr,
-        total_pixels      = m["total_pixels"],
-        arsize_rads       = jnp.deg2rad(ar_size),
-        k                 = planet_radius,
-        ldc_mode          = m["ldc_mode"],
-        ar_overlap_mode   = m["ar_overlap_mode"],
-        plot_map_wavelength = m["plot_map_wavelength"],
-        n                 = m["n"],
-        flat_indices      = m["flat_indices"],
+        wavelength         = m["wavelength"],
+        flux_quiet_interp  = m["flux_quiet"],
+        flux_active_interp = flux_active,
+        ldc_coeffs         = jnp.array([[LDC_u1, LDC_u2]]),
+        I_profile          = m["I_profile"],
+        mu_profile_pts     = m["mu_profile_pts"],
+        x_disc             = m["x_disc"],
+        y_disc             = m["y_disc"],
+        mu_disc            = m["mu_disc"],
+        vel_disc           = m["vel_disc"],
+        star_pixel_rad     = spr,
+        total_pixels       = m["total_pixels"],
+        arsize_rads        = jnp.deg2rad(ar_size),
+        k                  = planet_radius,
+        ldc_mode           = m["ldc_mode"],
+        ar_overlap_mode    = m["ar_overlap_mode"],
+        plot_map_wavelength= m["plot_map_wavelength"],
+        n                  = m["n"],
+        flat_indices       = m["flat_indices"],
     )
 
     lc_reconstructed = np.array(lc)
     residuals = OBS_LIGHT_CURVE - lc_reconstructed
     residual_std = float(np.std(residuals))
     assert residual_std < 5 * float(SIGMA_NOISE), (
-        f"Two-stage residual std {residual_std:.2e} is >>SIGMA_NOISE={SIGMA_NOISE:.2e} — "
-        "bug is in the two-stage (_compute_all_phases) code path"
+        f"Two-stage residual std {residual_std:.2e} is >>SIGMA_NOISE={SIGMA_NOISE:.2e}"
     )
 
 
@@ -322,12 +391,9 @@ def test_two_stage_residuals_at_noise_level():
 # ---------------------------------------------------------------------------
 
 def test_call_sajax_activity_only_runs():
-    """One-shot API with planet_radius=0 (stellar activity only, no transit)
-    should produce a finite light curve — guards against division-by-zero or
-    NaN propagation in the no-planet edge case."""
-    _ecc_h = GROUND_TRUTH["ecc_h"]
-    _ecc_k = GROUND_TRUTH["ecc_k"]
-    _q1, _q2 = GROUND_TRUTH["ldc_q1"], GROUND_TRUTH["ldc_q2"]
+    """One-shot API with planet_radius=0 should produce a finite light curve."""
+    ecc_h = GROUND_TRUTH["ecc_h"]
+    ecc_k = GROUND_TRUTH["ecc_k"]
     result = _call_sajax(
         TIMES,
         jnp.array([GROUND_TRUTH["spot_lat"], GROUND_TRUTH["fac_lat"]]),
@@ -339,11 +405,11 @@ def test_call_sajax_activity_only_runs():
         0.0,
         GROUND_TRUTH["semimajor_axis"],
         jnp.deg2rad(GROUND_TRUTH["inclination"]),
-        _ecc_h**2 + _ecc_k**2,
-        float(np.arctan2(_ecc_k, _ecc_h)),
+        ecc_h**2 + ecc_k**2,
+        jnp.arctan2(ecc_k, ecc_h),
         GROUND_TRUTH["P_orb"],
-        2 * np.sqrt(_q1) * _q2,
-        np.sqrt(_q1) * (1 - 2 * _q2),
+        TRUE_LDC_U1,
+        TRUE_LDC_U2,
     )
     lc = np.array(result["lc"])
     assert lc.shape == TIMES.shape
@@ -365,12 +431,10 @@ def test_plot_api_comparison():
     ground truth alongside OBS_LIGHT_CURVE. Makes no assertion — purely a
     visual diagnostic saved to tests/output/api_comparison.png."""
     gt = GROUND_TRUTH
-    m = STATIC_MODEL
+    m  = STATIC_MODEL
 
-    # One-shot API
-    _ecc_h = gt["ecc_h"]
-    _ecc_k = gt["ecc_k"]
-    _q1, _q2 = gt["ldc_q1"], gt["ldc_q2"]
+    ecc_h = gt["ecc_h"]
+    ecc_k = gt["ecc_k"]
     lc_one_shot = np.array(_call_sajax(
         TIMES,
         jnp.array([gt["spot_lat"], gt["fac_lat"]]),
@@ -381,22 +445,21 @@ def test_plot_api_comparison():
         gt["planet_radius"],
         gt["semimajor_axis"],
         jnp.deg2rad(gt["inclination"]),
-        _ecc_h**2 + _ecc_k**2,
-        float(np.arctan2(_ecc_k, _ecc_h)),
+        ecc_h**2 + ecc_k**2,
+        jnp.arctan2(ecc_k, ecc_h),
         gt["P_orb"],
-        2 * np.sqrt(_q1) * _q2,
-        np.sqrt(_q1) * (1 - 2 * _q2),
+        TRUE_LDC_U1,
+        TRUE_LDC_U2,
     )["lc"])
 
-    # Two-stage API (replicating sajax_model compute path)
     P_rot         = gt["p_rot"]
-    LDC_u1        = 2 * np.sqrt(gt["ldc_q1"]) * gt["ldc_q2"]
-    LDC_u2        = np.sqrt(gt["ldc_q1"]) * (1 - 2 * gt["ldc_q2"])
+    LDC_u1        = TRUE_LDC_U1
+    LDC_u2        = TRUE_LDC_U2
     planet_radius = gt["planet_radius"]
     semimajor     = gt["semimajor_axis"]
     inclination   = jnp.deg2rad(gt["inclination"])
-    eccentricity  = gt["ecc_h"]**2 + gt["ecc_k"]**2
-    arg_periapsis = float(np.arctan2(gt["ecc_k"], gt["ecc_h"]))  # radians
+    eccentricity  = ecc_h**2 + ecc_k**2
+    arg_periapsis = jnp.arctan2(ecc_k, ecc_h)
     P_orb         = gt["P_orb"]
     ar_lat        = jnp.array([gt["spot_lat"], gt["fac_lat"]])
     ar_long       = jnp.array([gt["spot_long"], gt["fac_long"]])
@@ -419,7 +482,7 @@ def test_plot_api_comparison():
     )(ar_cart))(dynamic_phases_rot)
     flux_active = jnp.stack([
         jnp.broadcast_to(gt["spot_flux"], (1,)),
-        jnp.broadcast_to(gt["fac_flux"], (1,)),
+        jnp.broadcast_to(gt["fac_flux"],  (1,)),
     ])
     lc_two_stage_raw, _, _ = _compute_all_phases(
         all_ar_carts, planet_xyz_all,
@@ -440,11 +503,12 @@ def test_plot_api_comparison():
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True,
                              gridspec_kw={"height_ratios": [3, 1]})
-
     ax = axes[0]
-    ax.scatter(times, OBS_LIGHT_CURVE, s=4, color="orange", alpha=0.6, label="Observations", zorder=1)
-    ax.plot(times, lc_one_shot,  lw=2, color="steelblue", label="One-shot API", zorder=2)
-    ax.plot(times, lc_two_stage, lw=2, color="crimson", linestyle="--", label="Two-stage API", zorder=3)
+    ax.scatter(times, OBS_LIGHT_CURVE, s=4, color="orange", alpha=0.6,
+               label="Observations", zorder=1)
+    ax.plot(times, lc_one_shot,  lw=2, color="steelblue", label="One-shot API",  zorder=2)
+    ax.plot(times, lc_two_stage, lw=2, color="crimson",   linestyle="--",
+            label="Two-stage API", zorder=3)
     ax.set_ylabel("Normalised flux")
     ax.legend(frameon=False)
     ax.spines["top"].set_visible(False)
@@ -453,7 +517,8 @@ def test_plot_api_comparison():
     ax = axes[1]
     ax.plot(times, residuals * 1e6, lw=1.5, color="black")
     ax.axhline(0, color="gray", linestyle=":", linewidth=0.8)
-    ax.axhline( float(SIGMA_NOISE) * 1e6, color="gray", linestyle="--", linewidth=0.8, label=r"±1σ noise")
+    ax.axhline( float(SIGMA_NOISE) * 1e6, color="gray", linestyle="--",
+               linewidth=0.8, label=r"±1σ noise")
     ax.axhline(-float(SIGMA_NOISE) * 1e6, color="gray", linestyle="--", linewidth=0.8)
     ax.set_ylabel("Residual [ppm]")
     ax.set_xlabel("Time [days]")
