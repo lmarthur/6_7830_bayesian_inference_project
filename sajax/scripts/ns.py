@@ -25,13 +25,12 @@ import numpyro.distributions as dist
 import tensorflow_probability.substrates.jax as tfp
 
 from model import (
-    make_log_density,
+    make_log_likelihood,
     plot_model,
-    _call_sajax,
+    plot_bestfit_lightcurve,
     OUTPUT_DIR,
     PARAM_NAMES,
     GROUND_TRUTH,
-    TIMES,
     OBS_LIGHT_CURVE,
     PRIOR_DISTRIBUTIONS,
 )
@@ -65,19 +64,18 @@ def main(seed=0, save_outputs=True):
     resample_key, run_key = jax.random.split(rng_key)
     _print = print if save_outputs else lambda *a, **kw: None
 
-    log_density_fn = make_log_density()
+    log_likelihood_fn = make_log_likelihood(OBS_LIGHT_CURVE)
     if save_outputs:
         plot_model(filename="sajax_ground_truth.png")
 
     # --- Define JAXNS prior and likelihood ---
     def prior_model():
-        samples = []
+        samples = {}
         for name, d in PRIOR_DISTRIBUTIONS.items():
-            val = yield jaxns.Prior(_numpyro_to_tfp(d), name=name)
-            samples.append(val)
-        return jnp.stack(samples)
+            samples[name] = yield jaxns.Prior(_numpyro_to_tfp(d), name=name)
+        return samples
 
-    model = jaxns.Model(prior_model=prior_model, log_likelihood=log_density_fn)
+    model = jaxns.Model(prior_model=prior_model, log_likelihood=log_likelihood_fn)
     if save_outputs:
         model.sanity_check(jax.random.PRNGKey(1), S=100)
 
@@ -101,10 +99,6 @@ def main(seed=0, save_outputs=True):
         replace=True,
     )
 
-    # Stack into (1, NUM_POSTERIOR_DRAWS, NDIM) — single pseudo-chain for ArviZ
-    param_arrays = [np.array(uniform_samples[name]) for name in PRIOR_DISTRIBUTIONS.keys()]
-    samples_nd = np.stack(param_arrays, axis=-1)[None, :, :]  # (1, NUM_POSTERIOR_DRAWS, 17)
-
     # --- Diagnostics ---
     jaxns_ess = float(results.ESS)
     total_likelihood_evals = int(results.total_num_likelihood_evaluations)
@@ -112,7 +106,8 @@ def main(seed=0, save_outputs=True):
     log_z = float(results.log_Z_mean)
     log_z_uncert = float(results.log_Z_uncert)
 
-    posterior_dict = {PARAM_NAMES[i]: samples_nd[:, :, i] for i in range(len(PARAM_NAMES))}
+    # uniform_samples keys match PRIOR_DISTRIBUTIONS (and thus PARAM_NAMES)
+    posterior_dict = {name: np.array(uniform_samples[name])[None, :] for name in PARAM_NAMES}
     _az_log = logging.getLogger("arviz")
     _az_prev = _az_log.level
     if not save_outputs:
@@ -122,7 +117,7 @@ def main(seed=0, save_outputs=True):
     _az_log.setLevel(_az_prev)
 
     gt_array = np.array([GROUND_TRUTH[p] for p in PARAM_NAMES])
-    posterior_means = samples_nd[0].mean(axis=0)
+    posterior_means = np.array([np.array(uniform_samples[name]).mean() for name in PARAM_NAMES])
     param_bias = posterior_means - gt_array
 
     _print("\n=== Diagnostics ===")
@@ -204,73 +199,20 @@ def main(seed=0, save_outputs=True):
     plt.close()
     _print(f"Saved full corner plot to {corner_path}")
 
-    # Best-fit light curve using posterior mean
-    mean_dict = {name: float(posterior_means[i]) for i, name in enumerate(PARAM_NAMES)}
-
-    lc_bestfit = np.array(
-        _call_sajax(
-            TIMES,
-            np.array([mean_dict["spot_lat"], mean_dict["fac_lat"]]),
-            np.array([mean_dict["spot_long"], mean_dict["fac_long"]]),
-            np.array([mean_dict["spot_size"], mean_dict["fac_size"]]),
-            np.stack([np.array([mean_dict["spot_flux"]]), np.array([mean_dict["fac_flux"]])]),
-            mean_dict["p_rot"],
-            mean_dict["planet_radius"],
-            mean_dict["semimajor_axis"],
-            np.deg2rad(mean_dict["inclination"]),
-            mean_dict["eccentricity"],
-            mean_dict["arg_periapsis"],
-            mean_dict["P_orb"],
-            mean_dict["LDC_u1"],
-            mean_dict["LDC_u2"],
-        )["lc"]
-    )
-
-    lc_true = np.array(
-        _call_sajax(
-            TIMES,
-            np.array([GROUND_TRUTH["spot_lat"], GROUND_TRUTH["fac_lat"]]),
-            np.array([GROUND_TRUTH["spot_long"], GROUND_TRUTH["fac_long"]]),
-            np.array([GROUND_TRUTH["spot_size"], GROUND_TRUTH["fac_size"]]),
-            np.stack([np.array([GROUND_TRUTH["spot_flux"]]), np.array([GROUND_TRUTH["fac_flux"]])]),
-            GROUND_TRUTH["p_rot"],
-            GROUND_TRUTH["planet_radius"],
-            GROUND_TRUTH["semimajor_axis"],
-            np.deg2rad(GROUND_TRUTH["inclination"]),
-            GROUND_TRUTH["eccentricity"],
-            GROUND_TRUTH["arg_periapsis"],
-            GROUND_TRUTH["P_orb"],
-            GROUND_TRUTH["LDC_u1"],
-            GROUND_TRUTH["LDC_u2"],
-        )["lc"]
-    )
-
-    fig, (ax_lc, ax_res) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
-                                         gridspec_kw={"height_ratios": [3, 1]})
-
-    ax_lc.scatter(TIMES, OBS_LIGHT_CURVE, s=4, color="orange", alpha=0.6,
-                  label="Observations", zorder=1)
-    ax_lc.plot(TIMES, lc_true, lw=2, color="steelblue", label="True", zorder=2)
-    ax_lc.plot(TIMES, lc_bestfit, lw=2, color="crimson", linestyle="--",
-               label="Posterior mean fit", zorder=3)
-    ax_lc.set_ylabel("Normalised flux")
-    ax_lc.legend(frameon=False)
-    ax_lc.spines["top"].set_visible(False)
-    ax_lc.spines["right"].set_visible(False)
-
-    residuals_ppm = (OBS_LIGHT_CURVE - lc_bestfit) * 1e6
-    ax_res.scatter(TIMES, residuals_ppm, s=4, color="orange", alpha=0.6)
-    ax_res.axhline(0, color="crimson", lw=1, linestyle="--")
-    ax_res.set_xlabel("Time [days]")
-    ax_res.set_ylabel("Residuals [ppm]")
-    ax_res.spines["top"].set_visible(False)
-    ax_res.spines["right"].set_visible(False)
-
-    fig.tight_layout()
-    lc_path = NS_OUTPUT_DIR / "bestfit_lightcurve.png"
-    fig.savefig(lc_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    _print(f"Saved best-fit light curve to {lc_path}")
+    # Best-fit light curve using posterior mean.
+    # Augment uniform_samples with derived quantities for plot_bestfit_lightcurve.
+    ecc_h = np.array(uniform_samples["ecc_h"])
+    ecc_k = np.array(uniform_samples["ecc_k"])
+    ldc_q1 = np.array(uniform_samples["ldc_q1"])
+    ldc_q2 = np.array(uniform_samples["ldc_q2"])
+    constrained_with_derived = {
+        **{name: np.array(uniform_samples[name]) for name in PRIOR_DISTRIBUTIONS},
+        "eccentricity": ecc_h**2 + ecc_k**2,
+        "arg_periapsis": np.arctan2(ecc_k, ecc_h),
+        "ldc_u1": 2 * np.sqrt(ldc_q1) * ldc_q2,
+        "ldc_u2": np.sqrt(ldc_q1) * (1 - 2 * ldc_q2),
+    }
+    plot_bestfit_lightcurve(constrained_with_derived, NS_OUTPUT_DIR)
 
     return diagnostics
 
