@@ -28,9 +28,14 @@ from model import (
     plot_model,
     sample_initial_positions,
     plot_bestfit_lightcurve,
+    compute_chi2,
+    compute_lc_from_constrained,
     OUTPUT_DIR,
     PARAM_NAMES,
     GROUND_TRUTH,
+    OBS_LIGHT_CURVE,
+    LC_TRUE,
+    TIMES,
 )
 
 AFFINV_OUTPUT_DIR = OUTPUT_DIR / "affinv"
@@ -40,6 +45,88 @@ NUM_SAMPLES = 1000
 NUM_WALKERS = 64
 NDIM = len(PARAM_NAMES)
 
+# Diagnostic stride controls — print a table row every DIAG_STRIDE steps,
+# save an LC snapshot every PLOT_STRIDE steps.
+DIAG_STRIDE = 10
+PLOT_STRIDE = 100
+
+
+
+_DIAG_PARAMS = [
+    "spot_lat", "spot_long", "spot_size", "spot_flux",
+    "fac_lat", "fac_long", "fac_size", "fac_flux",
+    "p_rot", "planet_radius", "inclination", "P_orb",
+]
+
+
+def run_step_diagnostics(raw, constrain_fn, unravel_fn, save_lcs=False, output_dir=None):
+    """
+    Iterate through the full sample trace (including burn-in) and print a
+    per-step table of walker-mean parameters and reduced chi-squared.
+
+    Saves an LC snapshot to output_dir/step_lcs/ every PLOT_STRIDE steps when
+    save_lcs=True.
+
+    Parameters
+    ----------
+    raw : ndarray, shape (NUM_STEPS, NUM_WALKERS, NDIM)
+        Raw unconstrained samples straight from trace.samples.coordinates.
+    """
+    n_steps, n_walkers, _ = raw.shape
+
+    print(f"\n=== Step-by-Step Diagnostics  "
+          f"(steps 0–{n_steps-1}, stride={DIAG_STRIDE}, {n_walkers} walkers) ===")
+    print(f"Values are the walker ensemble mean in constrained space.\n")
+
+    col_w = 13
+    header = f"{'step':>5}  {'chi2_red':>9}  " + "  ".join(f"{p:>{col_w}}" for p in _DIAG_PARAMS)
+    sep    = "=" * len(header)
+    print(header)
+    print(sep)
+
+    if save_lcs and output_dir is not None:
+        lc_dir = output_dir / "step_lcs"
+        lc_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        lc_dir = None
+
+    for step_idx in range(0, n_steps, DIAG_STRIDE):
+        mean_unc = jnp.array(raw[step_idx].mean(axis=0))
+        c = constrain_fn(unravel_fn(mean_unc))
+
+        chi2 = compute_chi2(c)
+        param_str = "  ".join(f"{float(c[p]):>{col_w}.5f}" for p in _DIAG_PARAMS)
+        print(f"{step_idx:>5}  {chi2:>9.4f}  {param_str}")
+
+        if lc_dir is not None and step_idx % PLOT_STRIDE == 0:
+            lc_model = np.array(compute_lc_from_constrained(c))
+            fig, (ax_lc, ax_res) = plt.subplots(
+                2, 1, figsize=(10, 5), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+            )
+            ax_lc.scatter(TIMES, OBS_LIGHT_CURVE, s=3, color="orange", alpha=0.5, label="Obs")
+            ax_lc.plot(TIMES, LC_TRUE, lw=1.5, color="steelblue", label="True")
+            ax_lc.plot(TIMES, lc_model, lw=1.5, color="crimson", ls="--",
+                       label=f"Step {step_idx} mean  χ²_r={chi2:.3f}")
+            ax_lc.legend(frameon=False, fontsize=9)
+            ax_lc.set_ylabel("Flux")
+            ax_lc.spines["top"].set_visible(False)
+            ax_lc.spines["right"].set_visible(False)
+
+            res_ppm = (OBS_LIGHT_CURVE - lc_model) * 1e6
+            ax_res.scatter(TIMES, res_ppm, s=3, color="orange", alpha=0.5)
+            ax_res.axhline(0, color="crimson", lw=1, ls="--")
+            ax_res.set_xlabel("Time [days]")
+            ax_res.set_ylabel("Res. [ppm]")
+            ax_res.spines["top"].set_visible(False)
+            ax_res.spines["right"].set_visible(False)
+
+            fig.tight_layout()
+            fig.savefig(lc_dir / f"lc_step_{step_idx:05d}.png", dpi=100, bbox_inches="tight")
+            plt.close(fig)
+
+    if lc_dir is not None:
+        print(f"\nLC snapshots saved to {lc_dir}/")
 
 
 def main(seed=0, save_outputs=True):
@@ -78,6 +165,11 @@ def main(seed=0, save_outputs=True):
 
     # Reshape: (NUM_STEPS, NUM_WALKERS, NDIM) -> (NUM_WALKERS, NUM_SAMPLES, NDIM)
     raw = np.asarray(trace.samples.coordinates)
+
+    # --- Step-by-step diagnostics (full trace, including burn-in) ---
+    run_step_diagnostics(raw, constrain_fn, unravel_fn,
+                         save_lcs=save_outputs, output_dir=AFFINV_OUTPUT_DIR)
+
     samples_unc = raw.transpose(1, 0, 2)
     samples_unc = samples_unc[:, NUM_BURNIN:, :]
 
