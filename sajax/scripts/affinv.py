@@ -36,8 +36,6 @@ from model import (
     OBS_LIGHT_CURVE,
     LC_TRUE,
     TIMES,
-    SIGMA_NOISE,
-    STATIC_MODEL,
 )
 
 AFFINV_OUTPUT_DIR = OUTPUT_DIR / "affinv"

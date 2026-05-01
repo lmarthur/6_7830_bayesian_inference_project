@@ -125,6 +125,7 @@ ECC_K_SCALE = 0.3   # √e·sin(ω) prior scale
 # ---------------------------------------------------------------------------
 # Prior distributions (numpyro) — single source of truth for all samplers
 # ---------------------------------------------------------------------------
+#Narrow
 PRIOR_DISTRIBUTIONS = {
     "spot_lat":      dist.Uniform(4.0, 6.0),
     "spot_long":     dist.Uniform(4.0, 6.0),
@@ -145,6 +146,26 @@ PRIOR_DISTRIBUTIONS = {
     "ldc_q2":        dist.Uniform(0.19, 0.21),
 }
 
+#Wide
+# PRIOR_DISTRIBUTIONS = {
+#     "spot_lat":      dist.Uniform(LAT_MIN, LAT_MAX),
+#     "spot_long":     dist.Uniform(LONG_MIN, LONG_MAX),
+#     "spot_size":     dist.Uniform(SIZE_MIN, SIZE_MAX),
+#     "spot_flux":     dist.Uniform(FLUX_MIN, FLUX_MAX),
+#     "fac_lat":       dist.Uniform(LAT_MIN, LAT_MAX),
+#     "fac_long":      dist.Uniform(LONG_MIN, LONG_MAX),
+#     "fac_size":      dist.Uniform(SIZE_MIN, SIZE_MAX),
+#     "fac_flux":      dist.Uniform(FLUX_MIN, FLUX_MAX),
+#     "p_rot":         dist.LogNormal(jnp.log(TRUE_P_ROT), 1.0),
+#     "planet_radius": dist.LogNormal(jnp.log(TRUE_PLANET_RADIUS), 0.5),
+#     "semimajor_axis":dist.LogNormal(jnp.log(5.0), 0.5),
+#     "inclination":   dist.Uniform(INCLINATION_MIN, INCLINATION_MAX),
+#     "ecc_h":         dist.Normal(0.0, ECC_H_SCALE),
+#     "ecc_k":         dist.Normal(0.0, ECC_K_SCALE),
+#     "P_orb":         dist.Normal(TRUE_P_ORB, 0.0005),
+#     "ldc_q1":        dist.Uniform(0.0, 1.0),
+#     "ldc_q2":        dist.Uniform(0.0, 1.0),
+# }
 
 # ---------------------------------------------------------------------------
 # Pre-build the Static Model for MCMC (Two-Stage API)
