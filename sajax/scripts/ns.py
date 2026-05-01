@@ -26,16 +26,38 @@ import tensorflow_probability.substrates.jax as tfp
 
 from model import (
     make_log_likelihood,
+    make_constrain_fn,
     plot_model,
     plot_bestfit_lightcurve,
+    compute_chi2,
+    compute_lc_from_constrained,
     OUTPUT_DIR,
     PARAM_NAMES,
     GROUND_TRUTH,
     OBS_LIGHT_CURVE,
+    LC_TRUE,
+    TIMES,
     PRIOR_DISTRIBUTIONS,
 )
 
 tfpd = tfp.distributions
+
+NS_OUTPUT_DIR = OUTPUT_DIR / "ns"
+
+MAX_SAMPLES = 1e5
+NUM_POSTERIOR_DRAWS = 5000
+NUM_LIVE_POINTS = 100
+DLOGZ_THRESHOLD = 5.0
+
+# Diagnostic stride — print intermediate results every DIAG_STRIDE dead points
+DIAG_STRIDE = 50
+PLOT_STRIDE = 200
+
+_DIAG_PARAMS = [
+    "spot_lat", "spot_long", "spot_size", "spot_flux",
+    "fac_lat", "fac_long", "fac_size", "fac_flux",
+    "p_rot", "planet_radius", "inclination", "P_orb",
+]
 
 
 def _numpyro_to_tfp(d):
@@ -52,11 +74,79 @@ def _numpyro_to_tfp(d):
         )
     raise TypeError(f"No TFP equivalent known for {type(d)}")
 
-NS_OUTPUT_DIR = OUTPUT_DIR / "ns"
 
-MAX_SAMPLES = 1e5
-NUM_POSTERIOR_DRAWS = 5000
-NUM_LIVE_POINTS = 100
+def run_nested_sampling_diagnostics(results, output_dir=None):
+    """
+    Analyze dead points from nested sampling and print diagnostics at regular intervals.
+    
+    Mimics the step-by-step diagnostics from MCMC, showing how parameters evolve
+    through the dead point shrinkage.
+    """
+    constrain_fn = make_constrain_fn()
+    
+    # Extract samples (dead points) in order
+    samples_dict = results.samples  # dict with keys matching PARAM_NAMES
+    log_L = np.array(results.log_L_samples[: int(results.total_num_samples)])
+    log_weights = np.array(results.log_dp_mean[: int(results.total_num_samples)])
+    
+    n_dead = len(log_L)
+    
+    print(f"\n=== Nested Sampling Diagnostics ===")
+    print(f"(Analyzing {n_dead} dead points, stride={DIAG_STRIDE})\n")
+    
+    col_w = 13
+    header = f"{'dead_idx':>6}  {'log_L':>10}  {'chi2_red':>9}  " + "  ".join(f"{p:>{col_w}}" for p in _DIAG_PARAMS)
+    sep    = "=" * len(header)
+    print(header)
+    print(sep)
+    
+    if output_dir is not None:
+        lc_dir = output_dir / "step_lcs"
+        lc_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        lc_dir = None
+    
+    # Iterate through dead points at regular intervals
+    for idx in range(0, n_dead, DIAG_STRIDE):
+        # Extract this dead point
+        constrained = {name: np.array(samples_dict[name])[idx] for name in PARAM_NAMES}
+        
+        # Compute chi-squared
+        chi2 = compute_chi2(constrained)
+        
+        param_str = "  ".join(f"{float(constrained[p]):>{col_w}.5f}" for p in _DIAG_PARAMS)
+        print(f"{idx:>6}  {log_L[idx]:>10.3f}  {chi2:>9.4f}  {param_str}")
+        
+        # Save LC snapshot every PLOT_STRIDE steps
+        if lc_dir is not None and idx % PLOT_STRIDE == 0:
+            lc_model = np.array(compute_lc_from_constrained(constrained))
+            fig, (ax_lc, ax_res) = plt.subplots(
+                2, 1, figsize=(10, 5), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+            )
+            ax_lc.scatter(TIMES, OBS_LIGHT_CURVE, s=3, color="orange", alpha=0.5, label="Obs")
+            ax_lc.plot(TIMES, LC_TRUE, lw=1.5, color="steelblue", label="True")
+            ax_lc.plot(TIMES, lc_model, lw=1.5, color="crimson", ls="--",
+                       label=f"Dead point {idx}  log L={log_L[idx]:.3f}  χ²_r={chi2:.3f}")
+            ax_lc.legend(frameon=False, fontsize=9)
+            ax_lc.set_ylabel("Flux")
+            ax_lc.spines["top"].set_visible(False)
+            ax_lc.spines["right"].set_visible(False)
+            
+            res_ppm = (OBS_LIGHT_CURVE - lc_model) * 1e6
+            ax_res.scatter(TIMES, res_ppm, s=3, color="orange", alpha=0.5)
+            ax_res.axhline(0, color="crimson", lw=1, ls="--")
+            ax_res.set_xlabel("Time [days]")
+            ax_res.set_ylabel("Res. [ppm]")
+            ax_res.spines["top"].set_visible(False)
+            ax_res.spines["right"].set_visible(False)
+            
+            fig.tight_layout()
+            fig.savefig(lc_dir / f"lc_deadpoint_{idx:05d}.png", dpi=100, bbox_inches="tight")
+            plt.close(fig)
+    
+    if lc_dir is not None:
+        print(f"\nLC snapshots saved to {lc_dir}/")
 
 
 def main(seed=0, save_outputs=True):
@@ -80,7 +170,11 @@ def main(seed=0, save_outputs=True):
         model.sanity_check(jax.random.PRNGKey(1), S=100)
 
     # --- Run nested sampler ---
-    ns = jaxns.NestedSampler(model=model, max_samples=MAX_SAMPLES, num_live_points=NUM_LIVE_POINTS, verbose=True)
+    ns = jaxns.NestedSampler(model=model, 
+                            max_samples=MAX_SAMPLES, 
+                            num_live_points=NUM_LIVE_POINTS,
+                            term_cond=jaxns.TerminationCondition(dlogZ=DLOGZ_THRESHOLD), 
+                            verbose=True)
 
     _print("Running nested sampling...")
     t0 = time.perf_counter()
@@ -89,6 +183,10 @@ def main(seed=0, save_outputs=True):
     wall_time_s = time.perf_counter() - t0
 
     _print(f"\nTermination reason: {termination_reason}")
+
+    # --- Run step-by-step diagnostics on dead points ---
+    if save_outputs:
+        run_nested_sampling_diagnostics(results, output_dir=NS_OUTPUT_DIR)
 
     # --- Resample to uniform posterior draws ---
     uniform_samples = jaxns.resample(

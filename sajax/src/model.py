@@ -135,7 +135,7 @@ PRIOR_DISTRIBUTIONS = {
     "fac_long":      dist.Uniform(160.0, 170.0),
     "fac_size":      dist.Uniform(15.0, 17.0),
     "fac_flux":      dist.Uniform(1.05, 1.15),
-    "p_rot":         dist.Normal(TRUE_P_ROT, 0.000001),
+    "p_rot":         dist.Normal(TRUE_P_ROT, 0.001),
     "planet_radius": dist.Uniform(0.095, 0.15),
     "semimajor_axis":dist.Uniform(4.0, 4.5),
     "inclination":   dist.Uniform(89.0, 91.0),
