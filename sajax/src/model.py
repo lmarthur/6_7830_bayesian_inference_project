@@ -134,7 +134,7 @@ PRIOR_DISTRIBUTIONS = {
     "fac_long":      dist.Uniform(160.0, 170.0),
     "fac_size":      dist.Uniform(15.0, 17.0),
     "fac_flux":      dist.Uniform(1.05, 1.15),
-    "p_rot":         dist.Normal(jnp.log(TRUE_P_ROT), 1.0),
+    "p_rot":         dist.Normal(TRUE_P_ROT, 1.0),
     "planet_radius": dist.Uniform(0.095, 0.15),
     "semimajor_axis":dist.Uniform(4.0, 4.5),
     "inclination":   dist.Uniform(89.0, 91.0),
@@ -563,6 +563,77 @@ def make_log_ref(rng_key):
         rng_key, _prior_only, model_args=(), model_kwargs={}
     )
     return lambda x: -prior_potential_fn(x)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic forward-model helpers
+# ---------------------------------------------------------------------------
+
+def compute_lc_from_constrained(constrained: dict, model_dict: dict = STATIC_MODEL) -> jnp.ndarray:
+    """Compute the light curve from constrained parameters (mirrors sajax_model forward pass)."""
+    dynamic_phases_rot = (model_dict["times"] / constrained["p_rot"] * 360.0) % 360.0
+
+    planet_xyz_all = compute_planet_sky_positions(
+        times=model_dict["times"],
+        t0=TRUE_T0_TRANSIT,
+        period=constrained["P_orb"],
+        a_over_rstar=constrained["semimajor_axis"],
+        inclination=jnp.deg2rad(constrained["inclination"]),
+        ecc=constrained["eccentricity"],
+        omega_peri=constrained["arg_periapsis"],
+    )
+
+    ar_lat  = jnp.array([constrained["spot_lat"],  constrained["fac_lat"]])
+    ar_long = jnp.array([constrained["spot_long"], constrained["fac_long"]])
+    ar_size = jnp.array([constrained["spot_size"],  constrained["fac_size"]])
+
+    spr = model_dict["star_pixel_rad"]
+    ar_cart = jnp.stack([
+        spr * jnp.sin(jnp.deg2rad(ar_long)) * jnp.cos(jnp.deg2rad(ar_lat)),
+        spr * jnp.sin(jnp.deg2rad(ar_lat)),
+        spr * jnp.cos(jnp.deg2rad(ar_long)) * jnp.cos(jnp.deg2rad(ar_lat)),
+    ], axis=-1)
+
+    all_ar_carts = jax.vmap(lambda p: jax.vmap(
+        lambda c: rotate_active_region(c, p, model_dict["inc_star"])
+    )(ar_cart))(dynamic_phases_rot)
+
+    flux_active = jnp.stack([
+        jnp.broadcast_to(jnp.asarray(constrained["spot_flux"]), (1,)),
+        jnp.broadcast_to(jnp.asarray(constrained["fac_flux"]),  (1,)),
+    ])
+
+    lc, _, _ = _compute_all_phases(
+        all_ar_carts,
+        planet_xyz_all,
+        wavelength=model_dict["wavelength"],
+        flux_quiet_interp=model_dict["flux_quiet"],
+        flux_active_interp=flux_active,
+        ldc_coeffs=jnp.array([[constrained["ldc_u1"], constrained["ldc_u2"]]]),
+        I_profile=model_dict["I_profile"],
+        mu_profile_pts=model_dict["mu_profile_pts"],
+        x_disc=model_dict["x_disc"],
+        y_disc=model_dict["y_disc"],
+        mu_disc=model_dict["mu_disc"],
+        vel_disc=model_dict["vel_disc"],
+        star_pixel_rad=spr,
+        total_pixels=model_dict["total_pixels"],
+        arsize_rads=jnp.deg2rad(ar_size),
+        k=constrained["planet_radius"],
+        ldc_mode=model_dict["ldc_mode"],
+        ar_overlap_mode=model_dict["ar_overlap_mode"],
+        plot_map_wavelength=model_dict["plot_map_wavelength"],
+        n=model_dict["n"],
+        flat_indices=model_dict["flat_indices"],
+    )
+    return lc
+
+
+def compute_chi2(constrained: dict, model_dict: dict = STATIC_MODEL) -> float:
+    """Reduced chi-squared (obs vs model) for a set of constrained parameters."""
+    lc = compute_lc_from_constrained(constrained, model_dict)
+    n = len(TIMES)
+    return float(jnp.sum(((jnp.array(OBS_LIGHT_CURVE) - lc) / SIGMA_NOISE) ** 2) / n)
 
 
 # ---------------------------------------------------------------------------
