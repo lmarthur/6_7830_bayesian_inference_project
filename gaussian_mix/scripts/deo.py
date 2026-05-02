@@ -171,8 +171,7 @@ def main(seed=0, save_outputs=True):
     # ArviZ summary on cold chain (treated as a single chain)
     _az_log = logging.getLogger("arviz")
     _az_prev = _az_log.level
-    if not save_outputs:
-        _az_log.setLevel(logging.ERROR)
+    _az_log.setLevel(logging.ERROR)
     idata = az.from_dict(
         posterior={"x1": cold_samples[None, :, 0], "x2": cold_samples[None, :, 1]},
     )
