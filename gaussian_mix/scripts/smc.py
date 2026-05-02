@@ -109,8 +109,7 @@ def main(seed=0, save_outputs=True):
     state = _smc_init.init(initial_positions)
 
     # AOT compile step_fn to exclude JIT from core timer
-    _warmup_key, _compile_key = jax.random.split(loop_key)
-    _c_step = step_fn.lower(_compile_key, state).compile()
+    _c_step = step_fn.lower(loop_key, state).compile()
 
     # core timer: SMC loop only, no JIT overhead
     # Each iteration forces synchronization via float(state.tempering_param).
@@ -178,8 +177,7 @@ def main(seed=0, save_outputs=True):
     # ArviZ summary — treat the (weighted, post-resampling) particles as one chain
     _az_log = logging.getLogger("arviz")
     _az_prev = _az_log.level
-    if not save_outputs:
-        _az_log.setLevel(logging.ERROR)
+    _az_log.setLevel(logging.ERROR)
     idata = az.from_dict(
         posterior={"x1": particles[:, 0][None, :], "x2": particles[:, 1][None, :]}
     )
