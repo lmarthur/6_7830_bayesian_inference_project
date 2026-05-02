@@ -28,12 +28,15 @@ import pt_jax
 from model import (
     make_log_density,
     plot_model,
-    _call_sajax,
+    plot_bestfit_lightcurve,
+    compute_chi2,
+    compute_lc_from_constrained,
     OUTPUT_DIR,
     PARAM_NAMES,
     GROUND_TRUTH,
-    TIMES,
     OBS_LIGHT_CURVE,
+    LC_TRUE,
+    TIMES,
     PRIOR_DISTRIBUTIONS,
 )
 
@@ -65,8 +68,8 @@ KERNEL = "rwmh"
 # following the Roberts-Gelman-Gilks (1997) optimal scaling rule. The values below
 # are the global multiplier α (dimensionless). α=1 starts at the rule's prediction;
 # tune cold to ~23% acceptance, hot larger to broaden hot-chain proposals.
-STEP_SIZE_HOT_RWMH = 5.0
-STEP_SIZE_COLD_RWMH = 1.0
+STEP_SIZE_HOT_RWMH = 0.5
+STEP_SIZE_COLD_RWMH = 0.005
 # TODO: MALA step sizes likely need further tuning. With the current values the
 # cold chain freezes near the mode (proposal scale too large for local geometry,
 # and chains can land outside bounded prior support and get pinned at log_p=-inf).
@@ -80,6 +83,16 @@ STEP_SIZE_COLD_MALA = 0.01
 # Smaller base → more chains needed to span the same range.
 ANNEALING_BASE = 1.4142135623730951  # sqrt(2)
 
+# Diagnostic stride — print intermediate results every DIAG_STRIDE dead points
+DIAG_STRIDE = 50
+PLOT_STRIDE = 200
+
+_DIAG_PARAMS = [
+    "spot_lat", "spot_long", "spot_size", "spot_flux",
+    "fac_lat", "fac_long", "fac_size", "fac_flux",
+    "p_rot", "planet_radius", "inclination", "P_orb",
+]
+
 # ===========================================================================
 
 
@@ -88,8 +101,7 @@ def get_initial_positions(key: jax.Array, num_chains: int) -> jnp.ndarray:
     positions = []
     for name in PARAM_NAMES:
         key, subkey = jax.random.split(key)
-        prior_key = name.lower() if name.startswith("LDC") else name
-        samples = PRIOR_DISTRIBUTIONS[prior_key].sample(subkey, sample_shape=(num_chains,))
+        samples = PRIOR_DISTRIBUTIONS[name].sample(subkey, sample_shape=(num_chains,))
         positions.append(samples)
     return jnp.stack(positions, axis=-1)
 
@@ -127,6 +139,86 @@ def mala_kernel_generator(log_p, step_size):
 
     return kernel
 
+def samples_to_constrained_dict(sample_array: np.ndarray) -> dict:
+    """
+    Convert a flat array of parameters (shape (ndim,) or (n_samples, ndim))
+    to a dict including derived quantities.
+    """
+    if sample_array.ndim == 1:
+        c = {name: float(sample_array[i]) for i, name in enumerate(PARAM_NAMES)}
+    else:
+        c = {name: sample_array[:, i] for i, name in enumerate(PARAM_NAMES)}
+
+    c["eccentricity"] = np.asarray(c["ecc_h"])**2 + np.asarray(c["ecc_k"])**2
+    c["arg_periapsis"] = np.arctan2(np.asarray(c["ecc_k"]), np.asarray(c["ecc_h"]))
+    c["ldc_u1"] = 2 * np.sqrt(np.asarray(c["ldc_q1"])) * np.asarray(c["ldc_q2"])
+    c["ldc_u2"] = np.sqrt(np.asarray(c["ldc_q1"])) * (1 - 2 * np.asarray(c["ldc_q2"]))
+    return c
+    
+def run_deo_diagnostics(cold_samples, save_lcs=False, output_dir=None):
+    """
+    Iterate through the cold chain samples and print a per-step table
+    of parameters and reduced chi-squared.
+
+    Parameters
+    ----------
+    cold_samples : ndarray, shape (NUM_SAMPLES, NDIM)
+        Cold chain samples in constrained space.
+    """
+    n_steps, _ = cold_samples.shape
+
+    print(f"\n=== DEO Step-by-Step Diagnostics ===")
+    print(f"(Analyzing {n_steps} cold-chain samples, stride={DIAG_STRIDE})\n")
+
+    col_w = 13
+    header = f"{'step':>5}  {'chi2_red':>9}  " + "  ".join(f"{p:>{col_w}}" for p in _DIAG_PARAMS)
+    sep = "=" * len(header)
+    print(header)
+    print(sep)
+
+    if save_lcs and output_dir is not None:
+        lc_dir = output_dir / "step_lcs"
+        lc_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        lc_dir = None
+
+    for step_idx in range(0, n_steps, DIAG_STRIDE):
+        constrained = samples_to_constrained_dict(cold_samples[step_idx])
+
+        chi2 = compute_chi2(constrained)
+        param_str = "  ".join(f"{float(constrained[p]):>{col_w}.5f}" for p in _DIAG_PARAMS)
+        print(f"{step_idx:>5}  {chi2:>9.4f}  {param_str}")
+
+        if lc_dir is not None and step_idx % PLOT_STRIDE == 0:
+            lc_model = np.array(compute_lc_from_constrained(constrained))
+            fig, (ax_lc, ax_res) = plt.subplots(
+                2, 1, figsize=(10, 5), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+            )
+            ax_lc.scatter(TIMES, OBS_LIGHT_CURVE, s=3, color="orange", alpha=0.5, label="Obs")
+            ax_lc.plot(TIMES, LC_TRUE, lw=1.5, color="steelblue", label="True")
+            ax_lc.plot(TIMES, lc_model, lw=1.5, color="crimson", ls="--",
+                       label=f"Step {step_idx}  χ²_r={chi2:.3f}")
+            ax_lc.legend(frameon=False, fontsize=9)
+            ax_lc.set_ylabel("Flux")
+            ax_lc.spines["top"].set_visible(False)
+            ax_lc.spines["right"].set_visible(False)
+
+            res_ppm = (OBS_LIGHT_CURVE - lc_model) * 1e6
+            ax_res.scatter(TIMES, res_ppm, s=3, color="orange", alpha=0.5)
+            ax_res.axhline(0, color="crimson", lw=1, ls="--")
+            ax_res.set_xlabel("Time [days]")
+            ax_res.set_ylabel("Res. [ppm]")
+            ax_res.spines["top"].set_visible(False)
+            ax_res.spines["right"].set_visible(False)
+
+            fig.tight_layout()
+            fig.savefig(lc_dir / f"lc_step_{step_idx:05d}.png", dpi=100, bbox_inches="tight")
+            plt.close(fig)
+
+    if lc_dir is not None:
+        print(f"\nLC snapshots saved to {lc_dir}/")
+
 
 def main(seed: int = 0, save_outputs: bool = True):
     init_key, sample_key = jax.random.split(jax.random.PRNGKey(seed))
@@ -142,12 +234,10 @@ def main(seed: int = 0, save_outputs: bool = True):
     t0 = time.perf_counter()
 
     # --- Reference distribution: the joint prior (likelihood-tempering path) ---
-    prior_keys = [name.lower() if name.startswith("LDC") else name for name in PARAM_NAMES]
-
     def log_ref(x):
         total = jnp.array(0.0)
-        for i, key in enumerate(prior_keys):
-            total = total + PRIOR_DISTRIBUTIONS[key].log_prob(x[i])
+        for i, name in enumerate(PARAM_NAMES):
+            total = total + PRIOR_DISTRIBUTIONS[name].log_prob(x[i])
         return total
 
     # --- Temperature schedule ---
@@ -163,9 +253,7 @@ def main(seed: int = 0, save_outputs: bool = True):
         # Per-dimension RWMH proposal scale: (2.38/√d) · prior_std_i.
         # The per-chain α multiplies this vector to form the proposal sigma.
         prior_stds = jnp.array([
-            float(jnp.sqrt(PRIOR_DISTRIBUTIONS[
-                name.lower() if name.startswith("LDC") else name
-            ].variance))
+            float(jnp.sqrt(PRIOR_DISTRIBUTIONS[name].variance))
             for name in PARAM_NAMES
         ])
         proposal_scale = (2.38 / jnp.sqrt(ndim)) * prior_stds
@@ -217,6 +305,10 @@ def main(seed: int = 0, save_outputs: bool = True):
     # Cold chain (β=1, target distribution) is the last chain.
     cold_samples = np.array(samples[:, -1, :])  # (NUM_SAMPLES, NDIM)
     mean_swap_rejection = np.array(rejection_rates.mean(axis=0))  # (NUM_CHAINS - 1,)
+
+    # --- Step-by-step diagnostics ---
+    if save_outputs:
+        run_deo_diagnostics(cold_samples, save_lcs=True, output_dir=DEO_OUTPUT_DIR)
 
     # --- Diagnostic: did the cold chain move? Compare first vs last sample ---
     _print("\nCold-chain movement check (first vs last sample):")
@@ -336,73 +428,6 @@ def main(seed: int = 0, save_outputs: bool = True):
     plt.close()
     _print(f"Saved full corner plot to {corner_path}")
 
-    # Best-fit light curve using posterior mean
-    mean_dict = {name: float(posterior_means[i]) for i, name in enumerate(PARAM_NAMES)}
-
-    lc_bestfit = np.array(
-        _call_sajax(
-            TIMES,
-            np.array([mean_dict["spot_lat"], mean_dict["fac_lat"]]),
-            np.array([mean_dict["spot_long"], mean_dict["fac_long"]]),
-            np.array([mean_dict["spot_size"], mean_dict["fac_size"]]),
-            np.stack([np.array([mean_dict["spot_flux"]]), np.array([mean_dict["fac_flux"]])]),
-            mean_dict["p_rot"],
-            mean_dict["planet_radius"],
-            mean_dict["semimajor_axis"],
-            np.deg2rad(mean_dict["inclination"]),
-            mean_dict["eccentricity"],
-            mean_dict["arg_periapsis"],
-            mean_dict["P_orb"],
-            mean_dict["LDC_u1"],
-            mean_dict["LDC_u2"],
-        )["lc"]
-    )
-
-    lc_true = np.array(
-        _call_sajax(
-            TIMES,
-            np.array([GROUND_TRUTH["spot_lat"], GROUND_TRUTH["fac_lat"]]),
-            np.array([GROUND_TRUTH["spot_long"], GROUND_TRUTH["fac_long"]]),
-            np.array([GROUND_TRUTH["spot_size"], GROUND_TRUTH["fac_size"]]),
-            np.stack([np.array([GROUND_TRUTH["spot_flux"]]), np.array([GROUND_TRUTH["fac_flux"]])]),
-            GROUND_TRUTH["p_rot"],
-            GROUND_TRUTH["planet_radius"],
-            GROUND_TRUTH["semimajor_axis"],
-            np.deg2rad(GROUND_TRUTH["inclination"]),
-            GROUND_TRUTH["eccentricity"],
-            GROUND_TRUTH["arg_periapsis"],
-            GROUND_TRUTH["P_orb"],
-            GROUND_TRUTH["LDC_u1"],
-            GROUND_TRUTH["LDC_u2"],
-        )["lc"]
-    )
-
-    fig, (ax_lc, ax_res) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
-                                         gridspec_kw={"height_ratios": [3, 1]})
-    ax_lc.scatter(TIMES, OBS_LIGHT_CURVE, s=4, color="orange", alpha=0.6,
-                  label="Observations", zorder=1)
-    ax_lc.plot(TIMES, lc_true, lw=2, color="steelblue", label="True", zorder=2)
-    ax_lc.plot(TIMES, lc_bestfit, lw=2, color="crimson", linestyle="--",
-               label="Posterior mean fit", zorder=3)
-    ax_lc.set_ylabel("Normalised flux")
-    ax_lc.legend(frameon=False)
-    ax_lc.spines["top"].set_visible(False)
-    ax_lc.spines["right"].set_visible(False)
-
-    residuals_ppm = (OBS_LIGHT_CURVE - lc_bestfit) * 1e6
-    ax_res.scatter(TIMES, residuals_ppm, s=4, color="orange", alpha=0.6)
-    ax_res.axhline(0, color="crimson", lw=1, linestyle="--")
-    ax_res.set_xlabel("Time [days]")
-    ax_res.set_ylabel("Residuals [ppm]")
-    ax_res.spines["top"].set_visible(False)
-    ax_res.spines["right"].set_visible(False)
-
-    fig.tight_layout()
-    lc_path = DEO_OUTPUT_DIR / "bestfit_lightcurve.png"
-    fig.savefig(lc_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    _print(f"Saved best-fit light curve to {lc_path}")
-
     # Per-pair swap rejection rates
     pair_labels = [f"{betas[i]:.3f}↔{betas[i+1]:.3f}" for i in range(NUM_CHAINS - 1)]
     fig, ax = plt.subplots(figsize=(8, 3))
@@ -418,6 +443,10 @@ def main(seed: int = 0, save_outputs: bool = True):
     fig.savefig(swap_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     _print(f"Saved swap rates plot to {swap_path}")
+
+    # Best-fit light curve using posterior mean (use plot_bestfit_lightcurve)
+    constrained_all = samples_to_constrained_dict(cold_samples)
+    plot_bestfit_lightcurve(constrained_all, DEO_OUTPUT_DIR)
 
     return diagnostics
 
