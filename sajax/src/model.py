@@ -585,7 +585,27 @@ def make_log_ref(rng_key):
     )
     return lambda x: -prior_potential_fn(x)
 
+def make_log_density(y_obs: np.ndarray = OBS_LIGHT_CURVE, model_dict: dict = STATIC_MODEL):
+    """
+    Returns log p(θ | y) ∝ log p(y | θ) + log p(θ) for a FLAT ARRAY of
+    constrained parameters (ordered as PARAM_NAMES).
 
+    For use with samplers that work directly in constrained space
+    (e.g. DEO parallel tempering with RWMH).
+    """
+    log_likelihood_fn = make_log_likelihood(y_obs, model_dict)
+
+    def log_density(x):
+        # x is a flat jnp array of shape (ndim,), ordered as PARAM_NAMES
+        params = {name: x[i] for i, name in enumerate(PARAM_NAMES)}
+        log_lik = log_likelihood_fn(params)
+        log_prior = jnp.array(0.0)
+        for i, name in enumerate(PARAM_NAMES):
+            log_prior = log_prior + PRIOR_DISTRIBUTIONS[name].log_prob(x[i])
+        return log_lik + log_prior
+
+    return log_density
+    
 # ---------------------------------------------------------------------------
 # Diagnostic forward-model helpers
 # ---------------------------------------------------------------------------
