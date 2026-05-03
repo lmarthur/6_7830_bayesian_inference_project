@@ -92,7 +92,7 @@ STELLAR_INC = 90.0
 STELLAR_GRID_SIZE = 100
 VE = 2.0                 
 
-SIGMA_NOISE = 100e-6     # ~100 ppm
+SIGMA_NOISE = 200e-6     # ~200 ppm
 
 # ---------------------------------------------------------------------------
 # Ground-truth spot and facula
@@ -125,8 +125,8 @@ INCLINATION_MIN, INCLINATION_MAX = 80.0, 100.0     # inclination [degrees]
 # ---------------------------------------------------------------------------
 #Narrow
 PRIOR_DISTRIBUTIONS = {
-    "spot_lat":      dist.Uniform(4.0, 6.0),
-    # "spot_lat":      dist.Uniform(LAT_MIN, LAT_MAX),
+    # "spot_lat":      dist.Uniform(4.0, 6.0),
+    "spot_lat":      dist.Uniform(LAT_MIN, LAT_MAX),
     "spot_long":     dist.Uniform(4.0, 6.0),
     # "spot_long":     dist.Uniform(LONG_MIN, LONG_MAX),
     "spot_size":     dist.Uniform(10.0, 12.0),
@@ -146,7 +146,7 @@ PRIOR_DISTRIBUTIONS = {
     "planet_radius": dist.Uniform(0.095, 0.15),
     # "planet_radius": dist.LogNormal(jnp.log(TRUE_PLANET_RADIUS), 0.5),
     # "semimajor_axis":dist.Uniform(0.0, 50.0),
-    "impact_param":dist.Uniform(0.0, 0.7),
+    "impact_param":dist.Uniform(-1.0, 1.0),
     # "semimajor_axis":dist.LogNormal(jnp.log(5.0), 0.5),
     # "inclination":   dist.Uniform(89.0, 91.0),
     "inclination":   dist.Uniform(INCLINATION_MIN, INCLINATION_MAX),
