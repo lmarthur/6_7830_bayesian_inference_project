@@ -145,11 +145,12 @@ PRIOR_DISTRIBUTIONS = {
     # "fac_flux":      dist.Uniform(1.05, 1.15),
     # "fac_flux":      dist.Uniform(FLUX_MIN, FLUX_MAX),
     "fac_flux":      dist.Normal(1.0, 0.2),
-    "p_rot":         dist.LogUniform(0.1, 30),
-    # "p_rot":         dist.LogNormal(jnp.log(TRUE_P_ROT), 1.0),
+    # "p_rot":         dist.LogUniform(0.1, 30),
+    "p_rot":         dist.Normal(TRUE_P_ROT, 0.1),
     "planet_radius": dist.LogUniform(0.095, 0.15),
     # "planet_radius": dist.LogNormal(jnp.log(TRUE_PLANET_RADIUS), 0.5),
-    "semimajor_axis":dist.LogUniform(1.5, 10),
+    "impact_param":  dist.Uniform(-1.0, 1.0),
+    # "semimajor_axis":dist.LogUniform(1.5, 10),
     # "semimajor_axis":dist.LogNormal(jnp.log(5.0), 0.5),
     "inclination":   dist.Uniform(89.0, 91.0),
     # "inclination":   dist.Uniform(INCLINATION_MIN, INCLINATION_MAX),
@@ -356,8 +357,9 @@ def sajax_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE), model_dict: dic
 
     # Planet parameters
     planet_radius = numpyro.sample("planet_radius", PRIOR_DISTRIBUTIONS["planet_radius"])
-    semimajor_axis = numpyro.sample("semimajor_axis", PRIOR_DISTRIBUTIONS["semimajor_axis"])
+    impact_param = numpyro.sample("impact_param", PRIOR_DISTRIBUTIONS["impact_param"])
     inclination = numpyro.sample("inclination", PRIOR_DISTRIBUTIONS["inclination"])
+    semimajor_axis = jnp.abs(impact_param / jnp.cos(jnp.deg2rad(inclination)))
     ecc_h = numpyro.sample("ecc_h", PRIOR_DISTRIBUTIONS["ecc_h"])
     ecc_k = numpyro.sample("ecc_k", PRIOR_DISTRIBUTIONS["ecc_k"])
     eccentricity = numpyro.deterministic("eccentricity", ecc_h**2 + ecc_k**2)
@@ -467,6 +469,7 @@ def make_constrain_fn():
 
     def constrain_fn(z):
         c = {name: transforms[name](z[name]) for name in transforms}
+        c["semimajor_axis"] = jnp.abs(c["impact_param"] / jnp.cos(jnp.deg2rad(c["inclination"])))
         c["eccentricity"]  = c["ecc_h"]**2 + c["ecc_k"]**2
         c["arg_periapsis"] = jnp.arctan2(c["ecc_k"], c["ecc_h"])
         c["ldc_u1"] = 2 * jnp.sqrt(c["ldc_q1"]) * c["ldc_q2"]
@@ -518,8 +521,9 @@ def make_log_likelihood(y_obs: np.ndarray = OBS_LIGHT_CURVE, model_dict: dict = 
         LDC_u1 = 2 * jnp.sqrt(ldc_q1) * ldc_q2
         LDC_u2 = jnp.sqrt(ldc_q1) * (1 - 2 * ldc_q2)
         planet_radius = params["planet_radius"]
-        semimajor_axis = params["semimajor_axis"]
+        impact_param = params["impact_param"]
         inclination = params["inclination"]
+        semimajor_axis = jnp.abs(impact_param / jnp.cos(jnp.deg2rad(inclination)))
         ecc_h = params["ecc_h"]
         ecc_k = params["ecc_k"]
         eccentricity = ecc_h**2 + ecc_k**2
@@ -710,7 +714,8 @@ GROUND_TRUTH = {
     "fac_flux": FLUX_ACTIVE_FACULA[0],
     "p_rot": TRUE_P_ROT,
     "planet_radius": TRUE_PLANET_RADIUS,
-    "semimajor_axis": TRUE_SEMI_MAJOR,
+    "impact_param": jnp.abs(TRUE_SEMI_MAJOR * jnp.cos(TRUE_INCLINATION)),
+    # "semimajor_axis": TRUE_SEMI_MAJOR,
     "inclination": float(jnp.rad2deg(TRUE_INCLINATION)),
     "ecc_h": float(jnp.sqrt(TRUE_ECCENTRICITY) * jnp.cos(TRUE_ARG_PERIAPSIS)),
     "ecc_k": float(jnp.sqrt(TRUE_ECCENTRICITY) * jnp.sin(TRUE_ARG_PERIAPSIS)),
