@@ -66,7 +66,6 @@ PLOT_STRIDE = 10      # save LC snapshots every N SMC iterations
 
 _DIAG_PARAMS = [
     "spot_lat", "spot_long", "spot_size", "spot_flux",
-    "fac_lat", "fac_long", "fac_size", "fac_flux",
     "p_rot", "planet_radius", "inclination", "P_orb",
 ]
 
