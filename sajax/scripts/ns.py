@@ -73,6 +73,11 @@ def _numpyro_to_tfp(d):
             concentration1=jnp.float64(d.concentration1),
             concentration0=jnp.float64(d.concentration0),
         )
+    elif isinstance(d, dist.LogUniform):
+        return tfpd.TransformedDistribution(
+            distribution=tfpd.Uniform(low=jnp.log(d.low), high=jnp.log(d.high)),
+            bijector=tfp.bijectors.Exp(),
+        )
     raise TypeError(f"No TFP equivalent known for {type(d)}")
 
 
