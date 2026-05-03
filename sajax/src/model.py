@@ -36,7 +36,7 @@ OUTPUT_DIR = Path(__file__).parent.parent / "output"
 # ---------------------------------------------------------------------------
 # Planet transit parameters (jaxoplanet)
 # ---------------------------------------------------------------------------
-TRUE_PLANET_RADIUS = 0.1
+TRUE_PLANET_RADIUS = 0.1                                                 #stellar-radii
 TRUE_P_ORB         = 1.0
 A_METERS           = ( (G.value * (1.0 * u.M_sun).to(u.kg).value * (TRUE_P_ORB * 24 * 3600)**2)/(4 * jnp.pi**2) )**(1/3)
 TRUE_SEMI_MAJOR    = A_METERS / (1.0 * u.R_sun).to(u.m).value
@@ -94,6 +94,47 @@ VE = 2.0
 SIGMA_NOISE = 100e-6     # ~100 ppm
 
 # ---------------------------------------------------------------------------
+# Physical constants for M1V host star (used to set physically motivated priors)
+# ---------------------------------------------------------------------------
+# T_eff ~ 3700 K for M1V (Rajpurohit et al. 2013, A&A 556, A15)
+T_STAR = 3700.0                  # K — photospheric temperature
+
+# Stellar radius: Boyajian et al. 2012 (ApJ 757, 112), Table 4 for M1V
+TRUE_R_STAR_RSUN = 0.50          # R_sun
+R_STAR_SIGMA_FRAC = 0.05         # fractional uncertainty from spectroscopy (Mann et al. 2015)
+
+# IAU 2015 nominal planetary radii in R_sun
+R_EARTH_RSUN = 0.009157          # 1 R_earth / 1 R_sun
+R_JUP_RSUN   = 0.10273           # 1 R_jup  / 1 R_sun
+
+# ---------------------------------------------------------------------------
+# Simulated "prior measurements" — realistic measurement noise applied to true
+# values. Priors are centered on these, not on the true values, to simulate
+# the realistic case where the prior comes from an independent measurement.
+# ---------------------------------------------------------------------------
+_meas_rng = np.random.default_rng(seed=7830)  # fixed seed for reproducibility
+
+# Rotation period: McQuillan et al. 2014 (ApJS 211): photometric monitoring of
+# a P ~ 0.5 day star achieves ~0.2% precision → σ ~ 0.001 days (~90 s).
+P_ROT_SIGMA = 0.001              # days
+P_ROT_MEASURED = float(TRUE_P_ROT + _meas_rng.normal(0.0, P_ROT_SIGMA))
+
+# Orbital period: ~5 transit observations, each with ~3 s timing uncertainty;
+# σ_P ≈ σ_t_c / (N-1) ~ 3 s / 4 ~ 1e-5 days.
+P_ORB_SIGMA = 1e-5               # days
+P_ORB_MEASURED = float(TRUE_P_ORB + _meas_rng.normal(0.0, P_ORB_SIGMA))
+
+# Stellar radius: 5% fractional uncertainty from spectroscopic classification.
+R_STAR_MEASURED_RSUN = float(
+    TRUE_R_STAR_RSUN + _meas_rng.normal(0.0, TRUE_R_STAR_RSUN * R_STAR_SIGMA_FRAC)
+)
+
+# True temperature deviation for ground-truth spot:
+# FLUX_ACTIVE_SPOT[0] = (T_active/T_STAR)^4  →  T_active = T_STAR * flux^0.25
+# delta_T = T_active - T_STAR
+TRUE_DELTA_T = float(T_STAR * (FLUX_ACTIVE_SPOT[0] ** 0.25 - 1.0))
+
+# ---------------------------------------------------------------------------
 # Ground-truth spot
 # ---------------------------------------------------------------------------
 TRUE_SPOT_LAT = 5.0
@@ -133,8 +174,8 @@ PRIOR_DISTRIBUTIONS = {
     # "spot_flux":     dist.Uniform(FLUX_MIN, FLUX_MAX),
     # "p_rot":         dist.LogUniform(0.1, 30),
     "p_rot":         dist.Normal(TRUE_P_ROT, 0.1),
-    # "planet_radius": dist.LogUniform(0.095, 0.15),
-    "planet_radius": dist.LogNormal(jnp.log(TRUE_PLANET_RADIUS), 0.5),
+    "planet_radius": dist.LogUniform(0.095, 0.15),
+    # "planet_radius": dist.LogNormal(jnp.log(TRUE_PLANET_RADIUS), 0.5),
     "impact_param":  dist.Uniform(-1.0, 1.0),
     # "semimajor_axis":dist.LogUniform(1.5, 10),
     # "semimajor_axis":dist.LogNormal(jnp.log(5.0), 0.5),

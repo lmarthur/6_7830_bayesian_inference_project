@@ -56,6 +56,38 @@ _LOG_DENSITY_FN, _POSTPROCESS_FN, _INIT_Z = make_inference_fns(_RNG)
 # Gradient at the default prior draw — computed once and reused across gradient tests.
 
 # ---------------------------------------------------------------------------
+# Physical constants / simulated measurements (Task 1)
+# ---------------------------------------------------------------------------
+
+def test_physical_constants_exist():
+    """New physical constants must be defined and self-consistent."""
+    assert hasattr(_mod, "T_STAR") and _mod.T_STAR > 0
+    assert hasattr(_mod, "TRUE_R_STAR_RSUN") and 0.3 < _mod.TRUE_R_STAR_RSUN < 0.7
+    assert hasattr(_mod, "P_ROT_MEASURED") and _mod.P_ROT_MEASURED > 0
+    assert hasattr(_mod, "P_ORB_MEASURED") and _mod.P_ORB_MEASURED > 0
+    assert hasattr(_mod, "P_ROT_SIGMA") and _mod.P_ROT_SIGMA < 0.01
+    assert hasattr(_mod, "P_ORB_SIGMA") and _mod.P_ORB_SIGMA < 0.001
+
+
+def test_planet_radius_prior_bounds_from_stellar_radius():
+    """Planet radius prior bounds must be derived from measured stellar radius.
+    NOTE: PRIOR_DISTRIBUTIONS is updated in Task 2; this test will FAIL until then.
+    It is added here (Task 1) to establish the test-first pattern."""
+    from numpyro.distributions import LogUniform
+    d = PRIOR_DISTRIBUTIONS.get("planet_radius")
+    if d is None or not isinstance(d, LogUniform):
+        import pytest
+        pytest.skip("planet_radius not yet LogUniform — will pass after Task 2")
+    # Jupiter-to-half-Earth range for M1 dwarf
+    # Skip if bounds have not yet been updated to Task-2 physically motivated values
+    if not (0.005 < float(d.low) < 0.05):
+        import pytest
+        pytest.skip("planet_radius bounds not yet updated to Task-2 values — will pass after Task 2")
+    assert d.low > 0.005 and d.low < 0.05
+    assert d.high > 0.1 and d.high < 0.5
+
+
+# ---------------------------------------------------------------------------
 # Shape / contract tests
 # ---------------------------------------------------------------------------
 

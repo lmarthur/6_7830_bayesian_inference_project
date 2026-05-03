@@ -29,6 +29,7 @@ from model import (
     make_constrain_fn,
     plot_model,
     plot_bestfit_lightcurve,
+    plot_prior_posterior,
     compute_chi2,
     compute_lc_from_constrained,
     OUTPUT_DIR,
@@ -46,8 +47,8 @@ NS_OUTPUT_DIR = OUTPUT_DIR / "ns"
 
 MAX_SAMPLES = 1e5
 NUM_POSTERIOR_DRAWS = 5000
-NUM_LIVE_POINTS = 200
-NUM_SLICES = 50
+NUM_LIVE_POINTS = 100
+NUM_SLICES = 5
 DLOGZ_THRESHOLD = 100.0
 
 # Diagnostic stride — print intermediate results every DIAG_STRIDE dead points
@@ -111,7 +112,8 @@ def run_nested_sampling_diagnostics(results, output_dir=None):
     
     for idx in range(0, n_dead, DIAG_STRIDE):
         constrained = {name: np.array(samples_dict[name])[idx] for name in PARAM_NAMES}
-        
+
+        constrained["semimajor_axis"] = np.abs(constrained["impact_param"] / np.cos(np.deg2rad(constrained["inclination"])))
         constrained["eccentricity"] = constrained["ecc_h"]**2 + constrained["ecc_k"]**2
         constrained["arg_periapsis"] = np.arctan2(constrained["ecc_k"], constrained["ecc_h"])
         constrained["ldc_u1"] = 2 * np.sqrt(constrained["ldc_q1"]) * constrained["ldc_q2"]
@@ -220,8 +222,11 @@ def main(seed=0, save_outputs=True):
     ecc_k = np.array(uniform_samples["ecc_k"])
     ldc_q1 = np.array(uniform_samples["ldc_q1"])
     ldc_q2 = np.array(uniform_samples["ldc_q2"])
+    impact_param = np.array(uniform_samples["impact_param"])
+    inclination = np.array(uniform_samples["inclination"])
     constrained_with_derived = {
         **{name: np.array(uniform_samples[name]) for name in PARAM_NAMES},
+        "semimajor_axis": np.abs(impact_param / np.cos(np.deg2rad(inclination))),
         "eccentricity": ecc_h**2 + ecc_k**2,
         "arg_periapsis": np.arctan2(ecc_k, ecc_h),
         "ldc_u1": 2 * np.sqrt(ldc_q1) * ldc_q2,
@@ -382,6 +387,9 @@ def main(seed=0, save_outputs=True):
 
     # 3. Best-fit light curve — delegate to model.py
     plot_bestfit_lightcurve(constrained_with_derived, NS_OUTPUT_DIR, map_params=None)
+
+    # 4. Per-parameter prior vs posterior plots
+    plot_prior_posterior(constrained_with_derived, NS_OUTPUT_DIR)
 
     return diagnostics
 
