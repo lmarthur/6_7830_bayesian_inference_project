@@ -255,16 +255,20 @@ def test_postprocess_fn_includes_deterministics():
 
 
 def test_postprocess_fn_uniform_params_within_bounds():
-    """All Uniform-prior parameters must be within their bounds after postprocessing,
-    across multiple prior draws.  This is the key test that was impossible to pass
-    with the old constrained-space log_density approach."""
+    """All Uniform-prior and LogUniform-prior parameters must be within their
+    bounds after postprocessing, across multiple prior draws."""
     bounds = {
-        "spot_lat":    (-90.0,  90.0),
-        "spot_long":   (  0.0, 360.0),
-        "spot_size":   (  1.0,  90.0),
-        "inclination": ( 80.0, 100.0),
-        "ldc_q1":      (  0.0,   1.0),
-        "ldc_q2":      (  0.0,   1.0),
+        # Primary sampled params with bounded support
+        "sin_lat":        (-1.0,   1.0),
+        "spot_long":      (  0.0, 360.0),
+        "spot_size":      (  1.0,  45.0),
+        "semimajor_axis": (  2.5,  50.0),
+        "impact_param":   ( -1.0,   1.0),
+        "ldc_q1":         (  0.0,   1.0),
+        "ldc_q2":         (  0.0,   1.0),
+        # Derived quantities — still in constrained dict, always valid
+        "spot_lat":       (-90.0,  90.0),
+        "inclination":    (  0.0, 180.0),
     }
     for seed in range(5):
         _, _, z = make_inference_fns(jax.random.PRNGKey(seed))
@@ -340,23 +344,27 @@ def test_log_ref_finite_at_multiple_draws():
 def test_ground_truth_residuals_at_noise_level():
     """Reconstructed light curve via the one-shot API at ground truth should
     match OBS_LIGHT_CURVE to within ~SIGMA_NOISE."""
-    ecc_h = GROUND_TRUTH["ecc_h"]
-    ecc_k = GROUND_TRUTH["ecc_k"]
-    semimajor_axis = jnp.abs(
-        GROUND_TRUTH["impact_param"] / jnp.cos(jnp.deg2rad(GROUND_TRUTH["inclination"]))
-    )
+    gt = GROUND_TRUTH
+    # Derive physical quantities from new primary parameterization
+    semimajor_axis  = gt["semimajor_axis"]
+    inclination_rad = float(jnp.arccos(gt["impact_param"] / semimajor_axis))
+    eccentricity    = gt["ecc_h"]**2 + gt["ecc_k"]**2
+    arg_periapsis   = jnp.arctan2(gt["ecc_k"], gt["ecc_h"])
+    spot_lat        = float(jnp.rad2deg(jnp.arcsin(gt["sin_lat"])))
+    spot_flux       = ((_mod.T_STAR + gt["delta_T"]) / _mod.T_STAR) ** 4
+
     result = _call_sajax(
         TIMES,
-        jnp.array([GROUND_TRUTH["spot_lat"]]),
-        jnp.array([GROUND_TRUTH["spot_long"]]),
-        jnp.array([GROUND_TRUTH["spot_size"]]),
-        np.stack([np.array([GROUND_TRUTH["spot_flux"]])]),
-        GROUND_TRUTH["p_rot"],
-        GROUND_TRUTH["planet_radius"],
+        jnp.array([spot_lat]),
+        jnp.array([gt["spot_long"]]),
+        jnp.array([gt["spot_size"]]),
+        np.stack([np.array([spot_flux])]),
+        gt["p_rot"],
+        gt["planet_radius"],
         semimajor_axis,
-        jnp.deg2rad(GROUND_TRUTH["inclination"]),
-        ecc_h**2 + ecc_k**2,
-        jnp.arctan2(ecc_k, ecc_h),
+        inclination_rad,
+        eccentricity,
+        arg_periapsis,
         TRUE_P_ORB,
         TRUE_LDC_U1,
         TRUE_LDC_U2,
@@ -376,19 +384,22 @@ def test_two_stage_residuals_at_noise_level():
     gt = GROUND_TRUTH
     m  = STATIC_MODEL
 
-    spot_lat      = gt["spot_lat"]
+    spot_lat      = float(jnp.rad2deg(jnp.arcsin(gt["sin_lat"])))
     spot_long     = gt["spot_long"]
     spot_size     = gt["spot_size"]
-    spot_flux     = gt["spot_flux"]
+    spot_flux     = ((_mod.T_STAR + gt["delta_T"]) / _mod.T_STAR) ** 4
     P_rot         = gt["p_rot"]
     LDC_u1        = TRUE_LDC_U1
     LDC_u2        = TRUE_LDC_U2
     planet_radius = gt["planet_radius"]
-    inclination   = jnp.deg2rad(gt["inclination"])
-    semimajor     = jnp.abs(gt["impact_param"] / jnp.cos(inclination))
+    semimajor     = gt["semimajor_axis"]
+    inclination   = float(jnp.arccos(gt["impact_param"] / semimajor))   # radians
     eccentricity  = gt["ecc_h"]**2 + gt["ecc_k"]**2
     arg_periapsis = jnp.arctan2(gt["ecc_k"], gt["ecc_h"])
     P_orb         = TRUE_P_ORB
+    ar_lat        = jnp.array([spot_lat])
+    ar_long       = jnp.array([spot_long])
+    ar_size       = jnp.array([spot_size])
 
     dynamic_phases_rot = (m["times"] / P_rot * 360.0) % 360.0
 
@@ -401,10 +412,6 @@ def test_two_stage_residuals_at_noise_level():
         ecc          = eccentricity,
         omega_peri   = arg_periapsis,
     )
-
-    ar_lat  = jnp.array([spot_lat])
-    ar_long = jnp.array([spot_long])
-    ar_size = jnp.array([spot_size])
 
     spr = m["star_pixel_rad"]
     ar_cart = jnp.stack([
@@ -459,23 +466,26 @@ def test_two_stage_residuals_at_noise_level():
 
 def test_call_sajax_activity_only_runs():
     """One-shot API with planet_radius=0 should produce a finite light curve."""
-    ecc_h = GROUND_TRUTH["ecc_h"]
-    ecc_k = GROUND_TRUTH["ecc_k"]
-    semimajor_axis = jnp.abs(
-        GROUND_TRUTH["impact_param"] / jnp.cos(jnp.deg2rad(GROUND_TRUTH["inclination"]))
-    )
+    gt = GROUND_TRUTH
+    semimajor_axis  = gt["semimajor_axis"]
+    inclination_rad = float(jnp.arccos(gt["impact_param"] / semimajor_axis))
+    eccentricity    = gt["ecc_h"]**2 + gt["ecc_k"]**2
+    arg_periapsis   = jnp.arctan2(gt["ecc_k"], gt["ecc_h"])
+    spot_lat        = float(jnp.rad2deg(jnp.arcsin(gt["sin_lat"])))
+    spot_flux       = ((_mod.T_STAR + gt["delta_T"]) / _mod.T_STAR) ** 4
+
     result = _call_sajax(
         TIMES,
-        jnp.array([GROUND_TRUTH["spot_lat"]]),
-        jnp.array([GROUND_TRUTH["spot_long"]]),
-        jnp.array([GROUND_TRUTH["spot_size"]]),
-        np.stack([np.array([GROUND_TRUTH["spot_flux"]])]),
-        GROUND_TRUTH["p_rot"],
+        jnp.array([spot_lat]),
+        jnp.array([gt["spot_long"]]),
+        jnp.array([gt["spot_size"]]),
+        np.stack([np.array([spot_flux])]),
+        gt["p_rot"],
         0.0,
         semimajor_axis,
-        jnp.deg2rad(GROUND_TRUTH["inclination"]),
-        ecc_h**2 + ecc_k**2,
-        jnp.arctan2(ecc_k, ecc_h),
+        inclination_rad,
+        eccentricity,
+        arg_periapsis,
         TRUE_P_ORB,
         TRUE_LDC_U1,
         TRUE_LDC_U2,
@@ -504,17 +514,20 @@ def test_plot_api_comparison():
 
     ecc_h = gt["ecc_h"]
     ecc_k = gt["ecc_k"]
-    gt_semimajor = jnp.abs(gt["impact_param"] / jnp.cos(jnp.deg2rad(gt["inclination"])))
+    gt_semimajor = gt["semimajor_axis"]
+    gt_inclination_rad = float(jnp.arccos(gt["impact_param"] / gt_semimajor))
+    gt_spot_lat = float(jnp.rad2deg(jnp.arcsin(gt["sin_lat"])))
+    gt_spot_flux = ((_mod.T_STAR + gt["delta_T"]) / _mod.T_STAR) ** 4
     lc_one_shot = np.array(_call_sajax(
         TIMES,
-        jnp.array([gt["spot_lat"]]),
+        jnp.array([gt_spot_lat]),
         jnp.array([gt["spot_long"]]),
         jnp.array([gt["spot_size"]]),
-        np.stack([np.array([gt["spot_flux"]])]),
+        np.stack([np.array([gt_spot_flux])]),
         gt["p_rot"],
         gt["planet_radius"],
         gt_semimajor,
-        jnp.deg2rad(gt["inclination"]),
+        gt_inclination_rad,
         ecc_h**2 + ecc_k**2,
         jnp.arctan2(ecc_k, ecc_h),
         TRUE_P_ORB,
@@ -526,12 +539,12 @@ def test_plot_api_comparison():
     LDC_u1        = TRUE_LDC_U1
     LDC_u2        = TRUE_LDC_U2
     planet_radius = gt["planet_radius"]
-    inclination   = jnp.deg2rad(gt["inclination"])
-    semimajor     = jnp.abs(gt["impact_param"] / jnp.cos(inclination))
+    inclination   = gt_inclination_rad
+    semimajor     = gt_semimajor
     eccentricity  = ecc_h**2 + ecc_k**2
     arg_periapsis = jnp.arctan2(ecc_k, ecc_h)
     P_orb         = TRUE_P_ORB
-    ar_lat        = jnp.array([gt["spot_lat"]])
+    ar_lat        = jnp.array([gt_spot_lat])
     ar_long       = jnp.array([gt["spot_long"]])
     ar_size       = jnp.array([gt["spot_size"]])
 
@@ -551,7 +564,7 @@ def test_plot_api_comparison():
         lambda c: rotate_active_region(c, p, m["inc_star"])
     )(ar_cart))(dynamic_phases_rot)
     flux_active = jnp.stack([
-        jnp.broadcast_to(gt["spot_flux"], (1,)),
+        jnp.broadcast_to(gt_spot_flux, (1,)),
     ])
     lc_two_stage_raw, _, _ = _compute_all_phases(
         all_ar_carts, planet_xyz_all,
@@ -633,12 +646,17 @@ def test_sample_initial_positions_within_prior_bounds():
     positions = sample_initial_positions(jax.random.PRNGKey(7), 10)
     constrained = jax.vmap(constrain_fn)(positions)
     bounds = {
-        "spot_lat":    (-90.0,  90.0),
-        "spot_long":   (  0.0, 360.0),
-        "spot_size":   (  1.0,  90.0),
-        "inclination": ( 80.0, 100.0),
-        "ldc_q1":      (  0.0,   1.0),
-        "ldc_q2":      (  0.0,   1.0),
+        # Primary sampled params with bounded support
+        "sin_lat":        (-1.0,   1.0),
+        "spot_long":      (  0.0, 360.0),
+        "spot_size":      (  1.0,  45.0),
+        "semimajor_axis": (  2.5,  50.0),
+        "impact_param":   ( -1.0,   1.0),
+        "ldc_q1":         (  0.0,   1.0),
+        "ldc_q2":         (  0.0,   1.0),
+        # Derived quantities always valid when primary params are valid
+        "spot_lat":       (-90.0,  90.0),
+        "inclination":    (  0.0, 180.0),
     }
     for name, (lo, hi) in bounds.items():
         vals = np.array(constrained[name])
