@@ -52,13 +52,17 @@ def _unconstrained_prior_std(d) -> float:
     Uniform(a, b): inverse bijection is logit → logistic distribution, std = π/√3.
     Normal(μ, σ) / LogNormal(μ, σ): bijection is identity / log, unconstrained std = σ.
     """
-    from numpyro.distributions import Uniform, Normal, LogNormal, LogUniform
+    from numpyro.distributions import Uniform, Normal, LogNormal, LogUniform, VonMises
     if isinstance(d, (Uniform, LogUniform)):
         # Both have bounded support; biject_to applies a logistic transform,
         # so the unconstrained variable is logistic(0,1) with std = π/√3.
         return float(np.pi / np.sqrt(3.0))
     elif isinstance(d, (Normal, LogNormal)):
         return float(d.scale)
+    elif isinstance(d, VonMises):
+        # Identity bijection (support = real); for near-uniform VonMises the
+        # distribution approaches Uniform(-π, π), which has std = π/√3.
+        return float(np.pi / np.sqrt(3.0))
     raise TypeError(f"No analytical unconstrained std for {type(d).__name__}")
 
 

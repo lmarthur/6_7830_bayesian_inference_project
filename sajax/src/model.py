@@ -167,9 +167,13 @@ PRIOR_DISTRIBUTIONS = {
     # on the sphere — corrects for the cos(lat) Jacobian factor so that equal
     # prior probability is assigned to equal solid angles.
     "sin_lat":       dist.Uniform(-1.0, 1.0),
+<<<<<<< Updated upstream
     "spot_long":     dist.Uniform(LONG_MIN, LONG_MAX), # TODO: Consider making this a circular/closed prior
     # log-uniform: spot size is a scale parameter (Jeffreys prior);
     # range spans detection floor (~1°) to giant polar spots (~45°).
+=======
+    "spot_long_rad": dist.VonMises(0.0, 1e-6),  # effectively uniform on circle; concentration=0 causes 0/0 NaN in Best (1979) sampler
+>>>>>>> Stashed changes
     "spot_size":     dist.LogUniform(1.0, 45.0),
 
     # --- Spot flux via temperature deviation ---
@@ -398,7 +402,8 @@ def sajax_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE), model_dict: dic
     """
     sin_lat = numpyro.sample("sin_lat", PRIOR_DISTRIBUTIONS["sin_lat"])
     spot_lat = numpyro.deterministic("spot_lat", jnp.rad2deg(jnp.arcsin(sin_lat)))
-    spot_long = numpyro.sample("spot_long", PRIOR_DISTRIBUTIONS["spot_long"])
+    spot_long_rad = numpyro.sample("spot_long_rad", PRIOR_DISTRIBUTIONS["spot_long_rad"])
+    spot_long = numpyro.deterministic("spot_long", jnp.rad2deg(spot_long_rad) % 360)
     spot_size = numpyro.sample("spot_size", PRIOR_DISTRIBUTIONS["spot_size"])
     delta_T = numpyro.sample("delta_T", PRIOR_DISTRIBUTIONS["delta_T"])
     spot_flux = numpyro.deterministic("spot_flux", ((T_STAR + delta_T) / T_STAR) ** 4)
@@ -526,7 +531,11 @@ def make_constrain_fn():
         c = {name: transforms[name](z[name]) for name in transforms}
         # Deterministic sites (all derived quantities computed analytically)
         c["spot_lat"] = jnp.rad2deg(jnp.arcsin(c["sin_lat"]))
+<<<<<<< Updated upstream
         c["spot_flux"] = ((T_STAR + c["delta_T"]) / T_STAR) ** 4
+=======
+        c["spot_long"] = jnp.rad2deg(c["spot_long_rad"]) % 360
+>>>>>>> Stashed changes
         c["inclination"] = jnp.rad2deg(jnp.arccos(c["impact_param"] / c["semimajor_axis"]))
         c["eccentricity"]  = c["ecc_h"]**2 + c["ecc_k"]**2
         c["arg_periapsis"] = jnp.arctan2(c["ecc_k"], c["ecc_h"])
@@ -608,9 +617,15 @@ def make_log_likelihood(y_obs: np.ndarray = OBS_LIGHT_CURVE, model_dict: dict = 
         arg_periapsis = jnp.arctan2(ecc_k, ecc_h)
         P_orb = params["P_orb"]
 
+<<<<<<< Updated upstream
         ar_lat  = jnp.array([spot_lat])
         ar_long = jnp.array([spot_long])
         ar_size = jnp.array([spot_size])
+=======
+        ar_lat = jnp.array([spot_lat])
+        ar_long = jnp.array([jnp.rad2deg(params["spot_long_rad"]) % 360])
+        ar_size = jnp.array([params["spot_size"]])
+>>>>>>> Stashed changes
 
         dynamic_phases_rot = (model_dict["times"] / P_rot * 360.0) % 360.0
 
@@ -782,6 +797,7 @@ def compute_chi2(constrained: dict, model_dict: dict = STATIC_MODEL) -> float:
 # to the actual data-generating parameters.
 # ---------------------------------------------------------------------------
 GROUND_TRUTH = {
+<<<<<<< Updated upstream
     # sin(TRUE_SPOT_LAT in radians) — the sampled variable in the new parameterization
     "sin_lat":       float(jnp.sin(jnp.deg2rad(TRUE_SPOT_LAT))),
     "spot_long":     float(TRUE_SPOT_LONG),
@@ -792,6 +808,14 @@ GROUND_TRUTH = {
     "p_rot":         float(TRUE_P_ROT),
     "planet_radius": float(TRUE_PLANET_RADIUS),
     # semimajor axis: a/R_star computed from Kepler's 3rd law at model setup
+=======
+    "sin_lat":      float(jnp.sin(jnp.deg2rad(TRUE_SPOT_LAT))),
+    "spot_long_rad": float(jnp.deg2rad(TRUE_SPOT_LONG)),
+    "spot_size": TRUE_SPOT_SIZE,
+    "spot_flux": FLUX_ACTIVE_SPOT[0],
+    "p_rot": TRUE_P_ROT,
+    "planet_radius": TRUE_PLANET_RADIUS,
+>>>>>>> Stashed changes
     "semimajor_axis": float(TRUE_SEMI_MAJOR),
     # impact parameter: b = (a/R_star) * cos(i); i=90° → b=0 for edge-on
     "impact_param":  float(TRUE_SEMI_MAJOR * jnp.cos(TRUE_INCLINATION)),

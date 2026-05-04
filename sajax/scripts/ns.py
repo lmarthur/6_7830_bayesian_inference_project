@@ -79,6 +79,11 @@ def _numpyro_to_tfp(d):
             distribution=tfpd.Uniform(low=jnp.log(d.low), high=jnp.log(d.high)),
             bijector=tfp.bijectors.Exp(),
         )
+    elif isinstance(d, dist.VonMises):
+        # JAXNS needs a quantile function; VonMises lacks one.
+        # Our VonMises has concentration=1e-6 (effectively uniform), so
+        # Uniform(-π, π) is an equivalent prior for the nested sampler.
+        return tfpd.Uniform(low=-jnp.pi, high=jnp.pi)
     raise TypeError(f"No TFP equivalent known for {type(d)}")
 
 
@@ -113,6 +118,7 @@ def run_nested_sampling_diagnostics(results, output_dir=None):
     
     for idx in range(0, n_dead, DIAG_STRIDE):
         constrained = {name: np.array(samples_dict[name])[idx] for name in PARAM_NAMES}
+<<<<<<< Updated upstream
         # Derive physical quantities from new primary parameterization
         constrained["spot_lat"]      = float(np.rad2deg(np.arcsin(constrained["sin_lat"])))
         constrained["spot_flux"]     = float(((T_STAR + constrained["delta_T"]) / T_STAR) ** 4)
@@ -120,6 +126,13 @@ def run_nested_sampling_diagnostics(results, output_dir=None):
             constrained["impact_param"] / constrained["semimajor_axis"]
         )))
         constrained["eccentricity"]  = constrained["ecc_h"]**2 + constrained["ecc_k"]**2
+=======
+
+        constrained["spot_lat"] = np.rad2deg(np.arcsin(constrained["sin_lat"]))
+        constrained["spot_long"] = np.rad2deg(constrained["spot_long_rad"]) % 360
+        constrained["inclination"] = np.rad2deg(np.arccos(constrained["impact_param"] / constrained["semimajor_axis"]))
+        constrained["eccentricity"] = constrained["ecc_h"]**2 + constrained["ecc_k"]**2
+>>>>>>> Stashed changes
         constrained["arg_periapsis"] = np.arctan2(constrained["ecc_k"], constrained["ecc_h"])
         constrained["ldc_u1"] = 2 * np.sqrt(constrained["ldc_q1"]) * constrained["ldc_q2"]
         constrained["ldc_u2"] = np.sqrt(constrained["ldc_q1"]) * (1 - 2 * constrained["ldc_q2"])
@@ -233,9 +246,15 @@ def main(seed=0, save_outputs=True):
     ldc_q2        = np.array(uniform_samples["ldc_q2"])
     constrained_with_derived = {
         **{name: np.array(uniform_samples[name]) for name in PARAM_NAMES},
+<<<<<<< Updated upstream
         "spot_lat":     np.rad2deg(np.arcsin(sin_lat_arr)),
         "spot_flux":    ((T_STAR + delta_T_arr) / T_STAR) ** 4,
         "inclination":  np.rad2deg(np.arccos(impact_arr / semimajor_arr)),
+=======
+        "spot_lat": np.rad2deg(np.arcsin(np.array(uniform_samples["sin_lat"]))),
+        "spot_long": np.rad2deg(np.array(uniform_samples["spot_long_rad"])) % 360,
+        "inclination": np.rad2deg(np.arccos(impact_param_arr / semimajor_axis_arr)),
+>>>>>>> Stashed changes
         "eccentricity": ecc_h**2 + ecc_k**2,
         "arg_periapsis": np.arctan2(ecc_k, ecc_h),
         "ldc_u1": 2 * np.sqrt(ldc_q1) * ldc_q2,
