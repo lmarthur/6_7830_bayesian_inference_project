@@ -435,7 +435,9 @@ def sajax_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE), model_dict: dic
     planet_radius = numpyro.sample("planet_radius", PRIOR_DISTRIBUTIONS["planet_radius"])
     semimajor_axis = numpyro.sample("semimajor_axis", PRIOR_DISTRIBUTIONS["semimajor_axis"])
     impact_param = numpyro.sample("impact_param", PRIOR_DISTRIBUTIONS["impact_param"])
-    inclination = numpyro.deterministic("inclination", jnp.arccos(impact_param / semimajor_axis))
+    inclination = numpyro.deterministic(
+        "inclination", jnp.rad2deg(jnp.arccos(impact_param / semimajor_axis))
+    )
     ecc_h = numpyro.sample("ecc_h", PRIOR_DISTRIBUTIONS["ecc_h"])
     ecc_k = numpyro.sample("ecc_k", PRIOR_DISTRIBUTIONS["ecc_k"])
     eccentricity = numpyro.deterministic("eccentricity", ecc_h**2 + ecc_k**2)
@@ -453,7 +455,7 @@ def sajax_model(y_obs: jnp.ndarray = jnp.array(OBS_LIGHT_CURVE), model_dict: dic
         t0=TRUE_T0_TRANSIT,
         period=P_orb,
         a_over_rstar=semimajor_axis,
-        inclination=inclination,
+        inclination=jnp.deg2rad(inclination),
         ecc=eccentricity,
         omega_peri=arg_periapsis
     )
