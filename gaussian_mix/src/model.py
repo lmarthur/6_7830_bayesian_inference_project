@@ -107,16 +107,16 @@ def plot_model(
     log_p = np.array(vmap_log_density(grid)).reshape(resolution, resolution)
     Z = np.exp(log_p)
 
-    fig = plt.figure(figsize=(8, 6))
+    fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
     ax.plot_surface(XX, YY, Z, cmap="viridis", linewidth=0, antialiased=True)
     ax.set_xlabel("x₁")
     ax.set_ylabel("x₂")
-    ax.set_zlabel("p(x)")
-    ax.set_title("2D Gaussian Mixture")
+    ax.set_zlabel("p(x)", labelpad=8)
+    # ax.set_title("2D Gaussian Mixture")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUTPUT_DIR / filename
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"Saved plot to {out_path}")
