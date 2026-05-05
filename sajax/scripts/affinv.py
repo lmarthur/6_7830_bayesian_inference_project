@@ -152,7 +152,7 @@ def main(seed=0, save_outputs=True):
     log_density_flat = lambda x: log_density_fn(unravel_fn(x))
 
     if save_outputs:
-        plot_model(filename="sajax_ground_truth.png")
+        plot_model(filename="sajax_ground_truth.pdf")
 
     t0 = time.perf_counter()
 

@@ -375,6 +375,7 @@ def aggregate(records: list) -> dict:
         "total_times":  [],
         "maes":         [],
         "actual_evals": [],
+        "actual_lde":   [],
     }))
     for rec in records:
         if rec.get("error") or rec["mode_weight_mae"] is None:
@@ -386,6 +387,12 @@ def aggregate(records: list) -> dict:
         out[a][b]["maes"].append(rec["mode_weight_mae"])
         if rec["actual_oracle_evals"] is not None:
             out[a][b]["actual_evals"].append(rec["actual_oracle_evals"])
+            # Normalise grad evals to LDE so all algorithms share the same axis
+            if rec.get("actual_oracle_type") == "grad":
+                lde = rec["actual_oracle_evals"] * GRAD_TO_LOGP_RATIO
+            else:
+                lde = float(rec["actual_oracle_evals"])
+            out[a][b]["actual_lde"].append(lde)
     return out
 
 
@@ -395,9 +402,8 @@ def aggregate(records: list) -> dict:
 
 def make_plots(records: list) -> None:
     """
-    Generate three publication-ready figures:
-      mae_vs_budget.png      -- ModeMAE vs LDE budget (the primary fair comparison)
-      mae_vs_core_time.png   -- ModeMAE vs wall_time_core_s
+    Generate two publication-ready figures:
+      mae_combined.png       -- ModeMAE vs LDE budget and vs core time (side-by-side, shared y-axis)
       budget_utilisation.png -- Actual oracle evals vs target budget (sanity check)
     """
     _rc = {
@@ -423,90 +429,94 @@ def make_plots(records: list) -> None:
 
     SCALING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ---- Figure 1: ModeMAE vs LDE budget (primary comparison) ----
-    _plot_mae_vs_x(
-        agg, algo_order, color_map, _rc,
-        x_key="budget",
-        fname="mae_vs_budget.png",
-        xlabel="Log-density-equivalent budget (LDE)",
-        title="Mode weight MAE vs. compute budget (equal budget across algorithms)",
-    )
+    # ---- Combined figure: MAE vs budget | MAE vs core time (shared y-axis) ----
+    with matplotlib.rc_context(_rc):
+        fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
 
-    # ---- Figure 2: ModeMAE vs core wall time ----
-    _plot_mae_vs_x(
-        agg, algo_order, color_map, _rc,
-        x_key="core_times",
-        fname="mae_vs_core_time.png",
-        xlabel="Wall-clock time, core (s)",
-        title="Mode weight MAE vs. core sampling time",
-    )
+        _draw_mae_on_ax(
+            agg, algo_order, color_map, ax_l,
+            x_key="actual_lde",
+            xlabel="Actual oracle budget (LDE, grad-normalised)",
+            title="Mode weight MAE vs. actual oracle budget",
+            show_legend=True,
+            show_annotation=False,
+        )
+        _draw_mae_on_ax(
+            agg, algo_order, color_map, ax_r,
+            x_key="core_times",
+            xlabel="Wall-clock time (s)",
+            title="Mode weight MAE vs. core sampling time",
+            show_legend=False,
+            show_annotation=False,
+        )
 
-    # ---- Figure 3: Budget utilisation (sanity check) ----
+        ax_l.set_ylabel("Mode weight MAE")
+        fig.tight_layout()
+        fname = SCALING_OUT_DIR / "mae_combined.pdf"
+        fig.savefig(fname, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved {fname}")
+
+    # ---- Budget utilisation (sanity check) ----
     _plot_budget_utilisation(agg, algo_order, color_map, _rc)
 
     print(f"Saved plots to {SCALING_OUT_DIR}/")
 
 
-def _plot_mae_vs_x(agg, algo_order, color_map, rc, x_key, fname, xlabel, title):
-    """Shared helper for MAE-vs-something plots."""
-    with matplotlib.rc_context(rc):
-        fig, ax = plt.subplots(figsize=(7, 5))
+def _draw_mae_on_ax(agg, algo_order, color_map, ax, x_key, xlabel, title,
+                    show_legend=True, show_annotation=True):
+    """Draw MAE-vs-X curves onto an existing axes object."""
+    for algo in algo_order:
+        if algo not in agg:
+            continue
+        effort_data = agg[algo]
+        med_x, med_mae, q25_mae, q75_mae = [], [], [], []
 
-        for algo in algo_order:
-            if algo not in agg:
-                continue
-            effort_data = agg[algo]
-            med_x, med_mae, q25_mae, q75_mae = [], [], [], []
-
-            for budget in sorted(effort_data.keys()):
-                d    = effort_data[budget]
-                maes = np.array(d["maes"])
-                if len(maes) == 0:
-                    continue
-
-                if x_key == "budget":
-                    med_x.append(float(budget))
-                else:
-                    times = np.array(d[x_key])
-                    med_x.append(float(np.median(times)))
-
-                med_mae.append(float(np.median(maes)))
-                q25_mae.append(float(np.percentile(maes, 25)))
-                q75_mae.append(float(np.percentile(maes, 75)))
-
-            if not med_x:
+        for budget in sorted(effort_data.keys()):
+            d    = effort_data[budget]
+            maes = np.array(d["maes"])
+            if len(maes) == 0:
                 continue
 
-            idx = np.argsort(med_x)
-            mx  = np.array(med_x)[idx]
-            mm  = np.array(med_mae)[idx]
-            lo  = np.array(q25_mae)[idx]
-            hi  = np.array(q75_mae)[idx]
-            c   = color_map[algo]
+            if x_key == "budget":
+                med_x.append(float(budget))
+            else:
+                times = np.array(d[x_key])
+                med_x.append(float(np.median(times)))
 
-            ax.plot(mx, mm, marker="o", markersize=5, lw=1.5,
-                    color=c, label=ALGO_LABELS.get(algo, algo), zorder=3)
-            ax.fill_between(mx, lo, hi, alpha=0.15, color=c, zorder=2)
+            med_mae.append(float(np.median(maes)))
+            q25_mae.append(float(np.percentile(maes, 25)))
+            q75_mae.append(float(np.percentile(maes, 75)))
 
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("Mode weight MAE")
-        ax.set_title(title, pad=8)
-        ax.grid(True, which="major", linestyle="--", linewidth=0.6,
-                color="gray", alpha=0.4, zorder=1)
-        ax.grid(True, which="minor", linestyle=":", linewidth=0.4,
-                color="gray", alpha=0.2, zorder=1)
+        if not med_x:
+            continue
+
+        idx = np.argsort(med_x)
+        mx  = np.array(med_x)[idx]
+        mm  = np.array(med_mae)[idx]
+        lo  = np.array(q25_mae)[idx]
+        hi  = np.array(q75_mae)[idx]
+        c   = color_map[algo]
+
+        ax.plot(mx, mm, marker="o", markersize=5, lw=1.5,
+                color=c, label=ALGO_LABELS.get(algo, algo), zorder=3)
+        ax.fill_between(mx, lo, hi, alpha=0.15, color=c, zorder=2)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(xlabel)
+    ax.grid(True, which="major", linestyle="--", linewidth=0.6,
+            color="gray", alpha=0.4, zorder=1)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.4,
+            color="gray", alpha=0.2, zorder=1)
+    if show_legend:
         ax.legend(loc="upper right")
+    if show_annotation:
         ax.annotate(
             f"Shaded band = IQR across {NUM_TRIALS} trials",
             xy=(0.02, 0.04), xycoords="axes fraction",
             fontsize=8, color="gray",
         )
-        fig.tight_layout()
-        fig.savefig(SCALING_OUT_DIR / fname, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved {SCALING_OUT_DIR / fname}")
 
 
 def _plot_budget_utilisation(agg, algo_order, color_map, rc):

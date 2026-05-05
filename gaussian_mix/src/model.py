@@ -85,7 +85,7 @@ def plot_model(
     weights=DEFAULT_WEIGHTS,
     grid_range=(-10, 10),
     resolution=200,
-    filename="gaussian_mixture.png",
+    filename="gaussian_mixture.pdf",
 ):
     """
     Saves a 3D surface plot of the 2D Gaussian mixture density to OUTPUT_DIR.
