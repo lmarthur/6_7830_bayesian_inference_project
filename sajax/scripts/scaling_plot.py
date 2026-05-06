@@ -86,7 +86,7 @@ _RC = {
     "axes.titlesize":      11,
     "axes.linewidth":      1.2,
     "legend.fontsize":     9,
-    "legend.framealpha":   0.9,
+    "legend.framealpha":   0.8,
     "xtick.direction":     "in",
     "ytick.direction":     "in",
     "xtick.top":           True,
@@ -144,7 +144,7 @@ def _draw_metric_on_ax(agg, algo_order, ax, x_key, y_key, xlabel, num_trials,
     ax.grid(True, which="minor", linestyle=":", linewidth=0.4,
             color="gray", alpha=0.2, zorder=1)
     if show_legend:
-        ax.legend(loc="best")
+        ax.legend(loc="upper left")
     if show_annotation:
         ax.annotate(
             f"Shaded band = IQR across {num_trials} trials",
@@ -315,7 +315,7 @@ def _plot_per_param_recovery(records, algo_order):
             f"(LDE = {max_budget:,}, median over {num_trials} trials)",
             pad=8,
         )
-        ax.legend(loc="upper right", fontsize=8, ncol=2)
+        ax.legend(loc="upper left", fontsize=8, ncol=2)
         ax.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.4)
         ax.set_xlim(-0.6, n_params - 0.4)
         ax.spines["top"].set_visible(False)
